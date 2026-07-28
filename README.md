@@ -137,6 +137,32 @@ The service will periodically (for example, every minute) execute these tasks:
 * Aggregate the results of forecasting produced by different ML models and compute the final signal score which reflects the strength of the upward or downward trend. Here we use many previously computed scores as inputs and derive one output score. 
 * Execute functions for interacting with external systems, for example, by sending notifications to a Telegram channel. It is also possible to configure a real trader which will execute buy or sell transactions
 
+# Microservices and Web UI (development)
+
+The project includes a FastAPI + React control plane:
+
+| Service | Port | Role |
+|---------|------|------|
+| web | 5173 | React UI |
+| api | 8000 | BFF / control plane |
+| pipeline | 8001 | Offline pipeline worker |
+| trader | 8002 | Online trader + control API |
+| redis | 6379 | Job state and logs |
+
+Start / stop (Docker Compose, hot reload):
+
+```bash
+bin/start_dev.sh
+bin/stop_dev.sh
+```
+
+- Web UI: http://localhost:5173
+- API docs: http://localhost:8000/docs
+- Default config: `configs/config-dev.jsonc` (created from sample on first start)
+- Data directory: `./data` (mounted into containers)
+
+Hot reload watches Python packages under `apps/`, `scripts/`, `common/`, `service/` and the Vite frontend.
+
 # Related projects
 
 - https://github.com/CryptoSignal/Crypto-Signal Github.com/CryptoSignal - #1 Quant Trading & Technical Analysis Bot

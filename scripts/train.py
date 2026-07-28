@@ -14,10 +14,9 @@ from common.generators import train_feature_set
 Train models for all target labels and all algorithms declared in the configuration using the specified features.
 """
 
-@click.command()
-@click.option('--config_file', '-c', type=click.Path(), default='', help='Configuration file name')
-def main(config_file):
-    load_config(config_file)
+def run_train(config_file: str = ""):
+    if config_file:
+        load_config(config_file)
     config = App.config
 
     App.model_store = ModelStore(config)
@@ -141,6 +140,12 @@ def main(config_file):
     #
     elapsed = datetime.now() - now
     print(f"Finished training models in {str(elapsed).split('.')[0]}")
+
+
+@click.command()
+@click.option('--config_file', '-c', type=click.Path(), default='', help='Configuration file name')
+def main(config_file):
+    run_train(config_file)
 
 
 if __name__ == '__main__':

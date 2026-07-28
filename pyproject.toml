@@ -60,7 +60,7 @@ Repository = "https://github.com/asavinov/intelligent-trading-bot"
 "Bug Tracker" = "https://github.com/asavinov/intelligent-trading-bot/issues"
 
 [tool.setuptools]
-packages = ["common", "inputs", "outputs", "scripts", "service"]
+packages = ["common", "inputs", "outputs", "scripts", "service", "apps", "apps.api", "apps.pipeline", "apps.trader"]
 include-package-data = false
 
 #[tool.setuptools.packages.find]

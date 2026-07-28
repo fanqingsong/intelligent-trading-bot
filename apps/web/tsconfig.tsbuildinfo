@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/api.ts","./src/main.tsx","./src/vite-env.d.ts","./src/pages/Backtest.tsx","./src/pages/Config.tsx","./src/pages/Dashboard.tsx","./src/pages/Data.tsx","./src/pages/Models.tsx","./src/pages/Pipeline.tsx","./src/pages/Signals.tsx","./src/pages/Trader.tsx"],"errors":true,"version":"5.7.3"}

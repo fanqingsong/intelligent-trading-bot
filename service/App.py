@@ -222,7 +222,9 @@ def problems_exist():
 
 def load_config(config_file):
     if config_file:
-        config_file_path = PACKAGE_ROOT / config_file
+        config_file_path = Path(config_file)
+        if not config_file_path.is_absolute():
+            config_file_path = PACKAGE_ROOT / config_file
         with open(config_file_path, encoding='utf-8') as json_file:
             #conf_str = json.load(json_file)
             conf_str = json_file.read()

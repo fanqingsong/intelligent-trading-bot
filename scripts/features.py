@@ -1,36 +1,33 @@
-from typing import Tuple
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
 import click
 
 from service.App import *
 from common.model_store import *
 from common.generators import generate_feature_set
 
+
 """
-Apply feature generators
+Apply feature generators.
 """
 
-@click.command()
-@click.option('--config_file', '-c', type=click.Path(), default='', help='Configuration file name')
-def main(config_file):
-    load_config(config_file)
+
+def run_features(config_file: str = ""):
+    if config_file:
+        load_config(config_file)
     config = App.config
 
     App.model_store = ModelStore(config)
     App.model_store.load_models()
 
     time_column = config["time_column"]
-
     now = datetime.now()
-
     symbol = config["symbol"]
     data_path = Path(config["data_folder"]) / symbol
 
-    # Determine desired data length depending on train/predict mode
     is_train = config.get("train")
     if is_train:
         window_size = config.get("train_length")
@@ -40,9 +37,6 @@ def main(config_file):
     if window_size:
         window_size += features_horizon
 
-    #
-    # Load merged data with regular time series
-    #
     file_path = data_path / config.get("merge_file_name")
     if not file_path.is_file():
         print(f"Data file does not exist: {file_path}")
@@ -59,23 +53,17 @@ def main(config_file):
 
     print(f"Finished loading {len(df)} records with {len(df.columns)} columns from the source file {file_path}")
 
-    # Select only the data necessary for analysis
     if window_size:
         df = df.tail(window_size)
         df = df.reset_index(drop=True)
 
     print(f"Input data size {len(df)} records. Range: [{df.iloc[0][time_column]}, {df.iloc[-1][time_column]}]")
 
-    #
-    # Generate derived features
-    #
     feature_sets = config.get("feature_sets", [])
     if not feature_sets:
         print(f"ERROR: no feature sets defined. Nothing to process.")
         return
 
-    # Apply all feature generators to the data frame which get accordingly new derived columns
-    # The feature parameters will be taken from config (depending on generator)
     print(f"Start generating features for {len(df)} input records.")
 
     all_features = []
@@ -91,18 +79,14 @@ def main(config_file):
 
     print(f"Finished generating features.")
 
-    # Handle NULLs
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    na_df = df[ df[all_features].isna().any(axis=1) ]
+    na_df = df[df[all_features].isna().any(axis=1)]
     if len(na_df) > 0:
         print(f"WARNING: There exist {len(na_df)} rows with NULLs in some feature columns")
 
     print(f"Number of NULL values:")
     print(df[all_features].isnull().sum().sort_values(ascending=False))
 
-    #
-    # Store feature matrix in output file
-    #
     out_file_name = config.get("feature_file_name")
     out_path = (data_path / out_file_name).resolve()
 
@@ -117,16 +101,19 @@ def main(config_file):
 
     print(f"Stored output file {out_path} with {len(df)} records")
 
-    #
-    # Store feature list
-    #
     with open(out_path.with_suffix('.txt'), "a+") as f:
-        f.write(", ".join([f'"{f}"' for f in all_features] ) + "\n\n")
+        f.write(", ".join([f'"{f}"' for f in all_features]) + "\n\n")
 
     print(f"Stored {len(all_features)} features in output file {out_path.with_suffix('.txt')}")
 
     elapsed = datetime.now() - now
     print(f"Finished generating {len(all_features)} features in {str(elapsed).split('.')[0]}. Time per feature: {str(elapsed/len(all_features)).split('.')[0]}")
+
+
+@click.command()
+@click.option('--config_file', '-c', type=click.Path(), default='', help='Configuration file name')
+def main(config_file):
+    run_features(config_file)
 
 
 if __name__ == '__main__':

@@ -253,3 +253,12 @@ config.json
 /config*.json  # Configs may have credentials
 /MODELS/
 /DATA/
+
+# Microservice / web
+/data/
+apps/web/node_modules/
+apps/web/dist/
+configs/config-dev.jsonc
+*.log
+
+.venv/

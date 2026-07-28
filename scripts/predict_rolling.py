@@ -29,10 +29,9 @@ The output predicted labels will cover shorter period of time because we need so
 # Main
 #
 
-@click.command()
-@click.option('--config_file', '-c', type=click.Path(), default='', help='Configuration file name')
-def main(config_file):
-    load_config(config_file)
+def run_predict_rolling(config_file: str = ""):
+    if config_file:
+        load_config(config_file)
     config = App.config
 
     App.model_store = ModelStore(config)
@@ -271,6 +270,12 @@ def main(config_file):
     #
     elapsed = datetime.now() - now
     print(f"Finished rolling prediction in {str(elapsed).split('.')[0]}")
+
+
+@click.command()
+@click.option('--config_file', '-c', type=click.Path(), default='', help='Configuration file name')
+def main(config_file):
+    run_predict_rolling(config_file)
 
 
 def execute_train_predict_step(config: dict, train_df: pd.DataFrame, predict_df: pd.DataFrame, parallel):

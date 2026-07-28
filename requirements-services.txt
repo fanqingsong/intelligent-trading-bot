@@ -1,0 +1,9 @@
+# Microservice control plane dependencies
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+redis==5.*
+httpx==0.28.*
+python-multipart==0.0.*
+pydantic==2.*
+sse-starlette==2.*
+joblib
