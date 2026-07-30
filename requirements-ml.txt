@@ -7,6 +7,7 @@ numpy==2.*
 pandas==2.*
 pyarrow
 python-binance==1.0.*
+akshare
 numba
 ta-lib
 scikit-learn==1.8.*

@@ -129,7 +129,14 @@ class Analyzer:
         time_column = self.config["time_column"]
         freq = self.config["freq"]
         merge_interpolate = self.config.get("merge_interpolate", False)
-        df = merge_data_sources(data_sources, time_column, freq, merge_interpolate)
+        trading_days_only = self.config.get("merge_trading_days_only", False)
+        df = merge_data_sources(
+            data_sources,
+            time_column,
+            freq,
+            merge_interpolate,
+            trading_days_only=trading_days_only,
+        )
 
         # Store part of the previous state for validation etc. purposes before it is overwritten
         self.previous_df = self.df.tail(10).copy()

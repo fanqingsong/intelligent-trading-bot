@@ -10,7 +10,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || res.statusText);
+    let message = text || res.statusText;
+    try {
+      const body = JSON.parse(text);
+      if (typeof body?.detail === "string") message = body.detail;
+      else if (body?.detail != null) message = JSON.stringify(body.detail);
+    } catch {
+      /* keep raw text */
+    }
+    throw new Error(message);
   }
   return res.json() as Promise<T>;
 }
@@ -21,6 +29,19 @@ export const api = {
   getConfig: () => request<{ path: string; content: string; parsed: any }>("/api/config"),
   putConfig: (content: string) =>
     request("/api/config", { method: "PUT", body: JSON.stringify({ content }) }),
+  analyze: (symbol: string) =>
+    request<{ job_id: string; status: string; symbol: string; steps: string[] }>("/api/analyze", {
+      method: "POST",
+      body: JSON.stringify({ symbol }),
+    }),
+  analyzeSuggest: (q: string, limit = 15) =>
+    request<{ query: string; items: { code: string; name: string; exchange: string; label: string }[] }>(
+      `/api/analyze/suggest?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
+  analyzeResult: (symbol?: string) => {
+    const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : "";
+    return request<any>(`/api/analyze/result${q}`);
+  },
   listSamples: () => request<{ samples: string[] }>("/api/config/samples"),
   loadSample: (name: string) =>
     request(`/api/config/load-sample/${encodeURIComponent(name)}`, { method: "POST" }),

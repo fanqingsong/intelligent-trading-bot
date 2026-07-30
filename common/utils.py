@@ -279,7 +279,14 @@ def append_df_combine_update(df, new_df):
     df2.update(new_df)
     return df2
 
-def merge_data_sources(data_sources: list, time_column: str, freq: str, merge_interpolate: bool):
+def merge_data_sources(
+    data_sources: list,
+    time_column: str,
+    freq: str,
+    merge_interpolate: bool,
+    trading_days_only: bool = False,
+    close_column: str = "close",
+):
     """
     Create one data frame by merging multiple source data frames on the specified time column by generating a common time raster.
 
@@ -287,6 +294,8 @@ def merge_data_sources(data_sources: list, time_column: str, freq: str, merge_in
     :param time_column: column name with timestamps
     :param freq: pandas frequency for the common time raster like 1min, 1h etc.
     :param merge_interpolate: if True then the missing values will be interpolated
+    :param trading_days_only: if True, drop rows where the primary close is NaN (weekends/holidays)
+    :param close_column: column used to detect non-trading days when trading_days_only is set
     :return: data frame with all data merged on timestamps
     """
     for ds in data_sources:
@@ -336,6 +345,14 @@ def merge_data_sources(data_sources: list, time_column: str, freq: str, merge_in
         num_columns = df_out.select_dtypes((float, int)).columns.tolist()
         for col in num_columns:
             df_out[col] = df_out[col].interpolate()
+
+    # Keep only rows with a real primary quote (A-share daily: drop weekends/holidays)
+    if trading_days_only and close_column in df_out.columns:
+        before = len(df_out)
+        df_out = df_out.dropna(subset=[close_column])
+        dropped = before - len(df_out)
+        if dropped:
+            print(f"Dropped {dropped} non-trading-day rows (empty {close_column})")
 
     return df_out
 

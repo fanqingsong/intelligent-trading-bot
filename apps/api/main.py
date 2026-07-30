@@ -111,6 +111,166 @@ def load_sample(name: str):
     return {"ok": True, "loaded": name}
 
 
+# ----- Analyze (A-share one-click) -----
+
+ASHARE_TEMPLATE = "config-ashare-1d.jsonc"
+
+
+class AnalyzeRequest(BaseModel):
+    symbol: str
+
+
+@app.get("/api/analyze/suggest")
+def analyze_suggest(
+    q: str = Query("", description="Stock code or name fragment"),
+    limit: int = Query(15, ge=1, le=50),
+):
+    """Typeahead suggestions for A-share code / name."""
+    from inputs.collector_ashare import search_ashare_stocks
+
+    query = (q or "").strip()
+    if len(query) < 1:
+        return {"query": query, "items": []}
+    try:
+        items = search_ashare_stocks(query, limit=limit)
+    except Exception as e:
+        raise HTTPException(503, f"Stock list unavailable: {e}") from e
+    return {"query": query, "items": items}
+
+
+def _apply_ashare_template(symbol: str) -> str:
+    """Load ashare template, inject symbol, preserve current data_folder."""
+    import re
+
+    from inputs.collector_ashare import normalize_ashare_symbol
+
+    code = normalize_ashare_symbol(symbol)
+    src = PACKAGE_ROOT / "configs" / ASHARE_TEMPLATE
+    if not src.exists():
+        raise HTTPException(500, f"Template not found: {ASHARE_TEMPLATE}")
+    text = src.read_text(encoding="utf-8")
+
+    try:
+        current = load_config_dict()
+        data_folder = current.get("data_folder", "/app/data")
+    except Exception:
+        data_folder = "/app/data"
+
+    text = re.sub(
+        r'"data_folder"\s*:\s*"[^"]*"',
+        f'"data_folder": "{data_folder}"',
+        text,
+    )
+    text = re.sub(r'"symbol"\s*:\s*"[^"]*"', f'"symbol": "{code}"', text, count=1)
+    text = re.sub(
+        r'"description"\s*:\s*"[^"]*"',
+        f'"description": "A-share {code} daily analysis"',
+        text,
+        count=1,
+    )
+    # First data_sources folder
+    text = re.sub(
+        r'("data_sources"\s*:\s*\[\s*\{\s*"folder"\s*:\s*")[^"]*(")',
+        rf"\g<1>{code}\2",
+        text,
+        count=1,
+    )
+    return text
+
+
+@app.post("/api/analyze")
+async def analyze_symbol(req: AnalyzeRequest):
+    from inputs.collector_ashare import resolve_ashare_query
+
+    try:
+        code = resolve_ashare_query(req.symbol)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    try:
+        text = _apply_ashare_template(code)
+        write_config_text(text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to apply template: {e}") from e
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            resp = await client.post(
+                f"{PIPELINE_URL}/internal/jobs",
+                json={"steps": list(PIPELINE_STEPS), "config_path": str(get_config_path())},
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(503, f"Pipeline service unavailable: {e}") from e
+    if resp.status_code >= 400:
+        raise HTTPException(resp.status_code, resp.text)
+
+    payload = resp.json()
+    return {
+        "job_id": payload.get("job_id"),
+        "status": payload.get("status"),
+        "symbol": code,
+        "steps": payload.get("steps", list(PIPELINE_STEPS)),
+    }
+
+
+@app.get("/api/analyze/result")
+def analyze_result(symbol: str | None = Query(None)):
+    """Summarize latest signals for the active (or requested) symbol."""
+    config = load_config_dict()
+    data_folder = get_data_folder(config)
+    sym = symbol or config.get("symbol", "")
+    if symbol:
+        try:
+            from inputs.collector_ashare import resolve_ashare_query
+
+            sym = resolve_ashare_query(symbol)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    signal_name = config.get("signal_file_name", "signals.csv")
+    path = data_folder / sym / signal_name
+    summary: dict[str, Any] = {
+        "symbol": sym,
+        "path": str(path),
+        "available": False,
+        "latest": None,
+        "recommendation": "HOLD",
+    }
+    if not path.exists():
+        return summary
+
+    if path.suffix == ".parquet":
+        df = pd.read_parquet(path)
+    else:
+        df = pd.read_csv(path)
+    if df.empty:
+        return summary
+
+    row = df.iloc[-1]
+    latest = json.loads(pd.DataFrame([row]).to_json(orient="records", date_format="iso"))[0]
+    buy = bool(row.get("buy_signal_column", False)) if "buy_signal_column" in df.columns else False
+    sell = bool(row.get("sell_signal_column", False)) if "sell_signal_column" in df.columns else False
+    score = row.get("trade_score")
+    if buy and not sell:
+        recommendation = "BUY"
+    elif sell and not buy:
+        recommendation = "SELL"
+    else:
+        recommendation = "HOLD"
+
+    summary.update({
+        "available": True,
+        "latest": latest,
+        "recommendation": recommendation,
+        "trade_score": None if score is None or (isinstance(score, float) and pd.isna(score)) else float(score),
+        "close": float(row["close"]) if "close" in df.columns and pd.notna(row.get("close")) else None,
+        "total_rows": len(df),
+    })
+    return summary
+
+
 # ----- Pipeline -----
 
 class PipelineJobRequest(BaseModel):

@@ -163,6 +163,16 @@ bin/stop_dev.sh
 
 Hot reload watches Python packages under `apps/`, `scripts/`, `common/`, `service/` and the Vite frontend.
 
+## A-share one-click analysis
+
+1. Start the stack: `bin/start_dev.sh`
+2. Open http://localhost:5173 (Analyze home page)
+3. Enter a 6-digit Shanghai/Shenzhen code (e.g. `600519`) and click **Go**
+4. The API applies `configs/config-ashare-1d.jsonc`, downloads daily bars via akshare, and runs the full offline pipeline (`download` → `output`)
+5. When the job completes, the page shows the latest BUY / SELL / HOLD summary from `signals.csv`
+
+No exchange API keys or Telegram tokens are required for this path. Live trading is not enabled for A-shares in this release.
+
 # Related projects
 
 - https://github.com/CryptoSignal/Crypto-Signal Github.com/CryptoSignal - #1 Quant Trading & Technical Analysis Bot

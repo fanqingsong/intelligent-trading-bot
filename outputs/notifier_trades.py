@@ -81,6 +81,17 @@ async def send_transaction_message(transaction, config):
 
     profit, profit_percent, profit_descr, profit_percent_descr = await generate_transaction_stats()
 
+    bot_token = config.get("telegram_bot_token")
+    chat_id = config.get("telegram_chat_id")
+    if not bot_token or not chat_id or "<" in str(bot_token):
+        log.info(
+            "Trade simulation recorded locally (Telegram not configured): %s profit=%.4f (%.2f%%)",
+            transaction.get("status"),
+            profit,
+            profit_percent,
+        )
+        return
+
     if transaction.get("status") == "SELL":
         message = "⚡💰 *SOLD: "
     elif transaction.get("status") == "BUY":
@@ -90,8 +101,6 @@ async def send_transaction_message(transaction, config):
 
     message += f" Profit: {profit_percent:.2f}% {profit:.4f}₮*"
 
-    bot_token = config["telegram_bot_token"]
-    chat_id = config["telegram_chat_id"]
     try:
         url = 'https://api.telegram.org/bot' + bot_token + '/sendMessage?chat_id=' + chat_id + '&parse_mode=markdown&text=' + message
         response = requests.get(url)

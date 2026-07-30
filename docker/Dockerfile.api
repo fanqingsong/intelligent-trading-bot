@@ -22,7 +22,7 @@ COPY apps ./apps
 
 RUN pip install --no-cache-dir -r requirements-services.txt \
     && pip install --no-cache-dir \
-        click tqdm numpy pandas pyarrow python-binance apscheduler \
+        click tqdm numpy pandas pyarrow python-binance apscheduler akshare \
     && pip install --no-cache-dir -e . --no-deps
 
 ENV PYTHONUNBUFFERED=1

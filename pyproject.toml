@@ -36,6 +36,7 @@ dependencies = [
     "pyarrow",
 
     "python-binance==1.0.*",
+    "akshare",
 
     "numba",
     "ta-lib",

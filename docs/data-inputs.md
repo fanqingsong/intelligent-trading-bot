@@ -60,6 +60,14 @@ The data provider is specified in the `venue` attribute. Currently, the followin
 -   `binance`: Binance
 -   `mt5`: MT5
 -   `yahoo`: Yahoo
+-   `ashare`: China A-shares (Shanghai / Shenzhen daily bars via [akshare](https://github.com/akfamily/akshare))
+
+### A-share (`ashare`) notes
+
+-   Use 6-digit codes in `symbol` and `data_sources[].folder` (e.g. `600519`, `000001`). Leading digit `6`/`9` → Shanghai, `0`/`3` → Shenzhen.
+-   Batch download only (`download_klines`). Online stream collectors are not implemented.
+-   Recommended frequency: `"1D"`. Set `"merge_trading_days_only": true` so weekends/holidays introduced by a calendar `date_range` are dropped after merge.
+-   Sample config: `configs/config-ashare-1d.jsonc`. The Web UI **Analyze** page calls `POST /api/analyze` to apply this template and run the full offline pipeline.
 
 ## Downloader
 

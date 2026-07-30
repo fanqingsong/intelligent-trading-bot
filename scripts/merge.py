@@ -66,7 +66,14 @@ def run_merge(config_file: str = ""):
 
     freq = App.config["freq"]
     merge_interpolate = App.config.get("merge_interpolate", False)
-    df_out = merge_data_sources(data_sources, time_column, freq, merge_interpolate)
+    trading_days_only = App.config.get("merge_trading_days_only", False)
+    df_out = merge_data_sources(
+        data_sources,
+        time_column,
+        freq,
+        merge_interpolate,
+        trading_days_only=trading_days_only,
+    )
 
     out_path = data_path / symbol / config.get("merge_file_name")
     out_path.parent.mkdir(parents=True, exist_ok=True)

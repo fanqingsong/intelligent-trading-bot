@@ -1,4 +1,5 @@
 import { NavLink, Route, Routes } from "react-router-dom";
+import AnalyzePage from "./pages/Analyze";
 import Dashboard from "./pages/Dashboard";
 import ConfigPage from "./pages/Config";
 import PipelinePage from "./pages/Pipeline";
@@ -8,8 +9,10 @@ import TraderPage from "./pages/Trader";
 import BacktestPage from "./pages/Backtest";
 import SignalsPage from "./pages/Signals";
 
-const links = [
-  ["/", "Dashboard"],
+const primaryLinks = [["/", "Analyze"]] as const;
+
+const advancedLinks = [
+  ["/dashboard", "Dashboard"],
   ["/config", "Config"],
   ["/pipeline", "Pipeline"],
   ["/data", "Data"],
@@ -25,19 +28,27 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           Intelligent Trading Bot
-          <span>Microservice control plane</span>
+          <span>A-share one-click analysis</span>
         </div>
         <nav className="nav">
-          {links.map(([to, label]) => (
+          {primaryLinks.map(([to, label]) => (
             <NavLink key={to} to={to} end={to === "/"}>
               {label}
+            </NavLink>
+          ))}
+          <div className="nav-section">Advanced</div>
+          {advancedLinks.map(([to, label]) => (
+            <NavLink key={to} to={to}>
+              {label}
+              {to === "/trader" ? " (off)" : ""}
             </NavLink>
           ))}
         </nav>
       </aside>
       <main className="main">
         <Routes>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/" element={<AnalyzePage />} />
+          <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/config" element={<ConfigPage />} />
           <Route path="/pipeline" element={<PipelinePage />} />
           <Route path="/data" element={<DataPage />} />

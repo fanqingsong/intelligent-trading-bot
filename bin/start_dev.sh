@@ -21,7 +21,7 @@ docker compose -f "${COMPOSE_FILE}" up -d --build
 
 echo ""
 echo "Services started:"
-echo "  Web UI:    http://localhost:5173"
+echo "  Web UI:    http://localhost:5174"
 echo "  API:       http://localhost:8000"
 echo "  API docs:  http://localhost:8000/docs"
 echo "  Pipeline:  http://localhost:8001"

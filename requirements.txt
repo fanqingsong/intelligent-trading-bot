@@ -8,6 +8,7 @@ pyarrow  # If parquet is used. Alternatively fastparquet
 
 # Downloaders/connectors
 python-binance==1.0.*
+akshare
 #yfinance
 #curl-cffi  # Used in yahoo downloder
 #MetaTrader5>=5.0.4874; sys_platform == 'win32'  # If mt5 venue is used

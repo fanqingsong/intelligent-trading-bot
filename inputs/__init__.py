@@ -6,6 +6,8 @@ def get_collector_functions(venue: Venue):
         return fetch_klines, health_check
     elif venue == Venue.YAHOO:
         raise NotImplementedError(f"Collector functions not implemented for this venue: {venue}")
+    elif venue == Venue.ASHARE:
+        raise NotImplementedError(f"Collector functions not implemented for this venue: {venue}")
     elif venue == venue.MT5:
         from inputs.collector_mt5 import fetch_klines, health_check
         return fetch_klines, health_check
@@ -18,6 +20,9 @@ def get_download_functions(venue: Venue):
         return download_klines
     elif venue == Venue.YAHOO:
         from inputs.collector_yahoo import download_klines
+        return download_klines
+    elif venue == Venue.ASHARE:
+        from inputs.collector_ashare import download_klines
         return download_klines
     elif venue == venue.MT5:
         from inputs.collector_mt5 import download_klines
