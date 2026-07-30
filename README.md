@@ -12,10 +12,11 @@
 
 # Intelligent trading bot
 
-The aim of the project is to develop an intelligent trading bot for automated trading including cryptocurrencies using state-of-the-art machine learning (ML) algorithms and feature engineering. The project provides the following major functionalities:
+The aim of the project is to develop an intelligent trading bot for automated trading including cryptocurrencies **and China A-shares (沪深)** using state-of-the-art machine learning (ML) algorithms and feature engineering. The project provides the following major functionalities:
 * Clear and consistent separation between *offline* (batch) mode for training ML models and *online* (stream) mode for predicting based on the trained models. One of the main challenges here is to guarantee that the same (derived) features are used in both modes
 * Extensible approach to defining *derived features* using (Python) functions including standard technical indicators as well as arbitrary custom features
 * Providing possibility to work with different *trade frequencies* (time rasters), for example, 1 minute, 1 hour or 1 day
+* **A-share one-click analysis** via the Web UI: enter a stock code or Chinese name, select a suggestion, and run the full offline pipeline (download → train → signals) without editing JSONC
 * Customizable functions for sending signals or predictions in online mode, for example, sending to Telegram channels, API end-point, storing in a database or executing real transactions
 * Functions for *backtesting* and measuring trade performance on historic data which is more difficult because requires periodic re-train of the used ML models
 * *Trading service* for online mode which uses a configuration file to regtularly retrieve data updates, do analysis and send signals or execute trade transactions
@@ -143,7 +144,7 @@ The project includes a FastAPI + React control plane:
 
 | Service | Port | Role |
 |---------|------|------|
-| web | 5173 | React UI |
+| web | 5174 | React UI (mapped from container 5173; use 5174 if 5173 is already taken) |
 | api | 8000 | BFF / control plane |
 | pipeline | 8001 | Offline pipeline worker |
 | trader | 8002 | Online trader + control API |
@@ -156,7 +157,7 @@ bin/start_dev.sh
 bin/stop_dev.sh
 ```
 
-- Web UI: http://localhost:5173
+- Web UI: http://localhost:5174
 - API docs: http://localhost:8000/docs
 - Default config: `configs/config-dev.jsonc` (created from sample on first start)
 - Data directory: `./data` (mounted into containers)
@@ -165,13 +166,40 @@ Hot reload watches Python packages under `apps/`, `scripts/`, `common/`, `servic
 
 ## A-share one-click analysis
 
-1. Start the stack: `bin/start_dev.sh`
-2. Open http://localhost:5173 (Analyze home page)
-3. Enter a 6-digit Shanghai/Shenzhen code (e.g. `600519`) and click **Go**
-4. The API applies `configs/config-ashare-1d.jsonc`, downloads daily bars via akshare, and runs the full offline pipeline (`download` → `output`)
-5. When the job completes, the page shows the latest BUY / SELL / HOLD summary from `signals.csv`
+Analyze A-share (Shanghai / Shenzhen) daily bars without editing JSONC or configuring exchange keys.
 
-No exchange API keys or Telegram tokens are required for this path. Live trading is not enabled for A-shares in this release.
+1. Start the stack: `bin/start_dev.sh`
+2. Open http://localhost:5174 — home page is **Analyze**
+3. Type a **code** (e.g. `600519`) or **Chinese name** (e.g. `贵州茅台` / `茅台`)
+4. Pick a suggestion from the dropdown (mouse or ↑↓ + Enter), then click **Go**
+5. The API applies [`configs/config-ashare-1d.jsonc`](configs/config-ashare-1d.jsonc), downloads history via akshare, and runs the full offline pipeline (`download` → `merge` → `features` → `labels` → `train` → `predict` → `signals` → `output`)
+6. When the job completes, the page shows the latest BUY / SELL / HOLD summary from `signals.csv`
+
+**What happens inside the pipeline (summary):**
+
+1. **Data** — forward-adjusted daily OHLCV (`timestamp, open, high, low, close, volume`)
+2. **Features** — TA-Lib SMA / slope / STDDEV on `close` (windows 5/10/20/60)
+3. **Labels** — within the next 5 days, does price first hit **+3%** (`high_30`) or **−3%** (`low_30`)?
+4. **Model** — two `StandardScaler` + `SVC(probability=True)` classifiers (last ~750 sessions), outputs probabilities `high_30_svc` / `low_30_svc`
+5. **Signal** — `trade_score = high_30_svc − low_30_svc`; BUY if `≥ 0.08`, SELL if `≤ -0.08`, else HOLD
+
+Full step-by-step explanation (columns, thresholds, caveats): **[docs/ashare.md](docs/ashare.md)**.
+
+### Related API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/analyze/suggest?q=...` | Typeahead by code prefix or name |
+| `POST` | `/api/analyze` | Body `{ "symbol": "600519" }` or a unique name → write config + start pipeline |
+| `GET` | `/api/analyze/result?symbol=...` | Latest signal summary |
+
+Notes:
+
+- First suggestion request may be slow while the A-share code/name list is cached (TTL 24h).
+- No Binance / MT5 / Telegram credentials are required for this path.
+- Live trading is **not** enabled for A-shares in this release (simulation output only).
+- Data source details: [docs/data-inputs.md](docs/data-inputs.md) (`venue: ashare`).
+- Full A-share guide: [docs/ashare.md](docs/ashare.md).
 
 # Related projects
 

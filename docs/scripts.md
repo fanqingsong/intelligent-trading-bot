@@ -33,6 +33,9 @@ The quote name (which also serves as the subfolder name) and file name ("klines"
 If a source file already exists, the script retrieves only the latest missing data and appends these rows to the file.
 Otherwise, all available data is retrieved and stored in a new file.
 
+For China A-shares, set `"venue": "ashare"` and use a 6-digit code as `folder` (see sample `configs/config-ashare-1d.jsonc` and [ashare.md](ashare.md)).
+The Web UI Analyze page can apply that template and run all pipeline steps without calling these scripts manually.
+
 The `merge` script combines all source files specified in the `data_sources` section and stores the result in a single output file:
 ```console
 python -m scripts.merge -c config.json

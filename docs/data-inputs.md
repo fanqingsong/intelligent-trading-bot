@@ -64,10 +64,17 @@ The data provider is specified in the `venue` attribute. Currently, the followin
 
 ### A-share (`ashare`) notes
 
--   Use 6-digit codes in `symbol` and `data_sources[].folder` (e.g. `600519`, `000001`). Leading digit `6`/`9` → Shanghai, `0`/`3` → Shenzhen.
--   Batch download only (`download_klines`). Online stream collectors are not implemented.
--   Recommended frequency: `"1D"`. Set `"merge_trading_days_only": true` so weekends/holidays introduced by a calendar `date_range` are dropped after merge.
--   Sample config: `configs/config-ashare-1d.jsonc`. The Web UI **Analyze** page calls `POST /api/analyze` to apply this template and run the full offline pipeline.
+-   **Market:** Shanghai / Shenzhen only (codes starting with `6`/`9` → SH, `0`/`3` → SZ). Beijing Stock Exchange is not included.
+-   **Symbols:** Store 6-digit codes in `symbol` and `data_sources[].folder` (e.g. `600519`, `000001`). Avoid exchange suffixes in folder names.
+-   **Name resolution:** Helpers in `inputs/collector_ashare.py` load a cached code/name table (`ak.stock_info_a_code_name`, 24h TTL):
+    -   `search_ashare_stocks(query)` — typeahead by code prefix or name substring
+    -   `resolve_ashare_query(query)` — resolve a code or unique Chinese name to one code
+    -   Web API: `GET /api/analyze/suggest`, `POST /api/analyze` (accepts code or name)
+-   **Download:** Batch only (`download_klines`). Prefers Sina daily history (`stock_zh_a_daily`); falls back to East Money year-by-year chunks if needed. Online stream collectors are not implemented.
+-   **Frequency:** Use `"1D"`. Set `"merge_trading_days_only": true` so weekends/holidays introduced by a calendar `date_range` are dropped after merge (required for stable daily features).
+-   **Sample config:** `configs/config-ashare-1d.jsonc` (day-scale feature windows, local `trader_simulation` output, no Telegram).
+-   **UI:** Analyze home page — enter code or name, select a suggestion, click **Go**.
+-   **Guide:** [ashare.md](ashare.md)
 
 ## Downloader
 
@@ -87,6 +94,8 @@ Downloaded data from different sources is not used in isolation. Instead, it is 
 
 -   Generate a continuous time raster based on the configured frequency to prevent gaps in the source data.
 -   Append all source data (columns) to this table by aligning rows with the generated raster.
+
+For daily A-share data (`freq: "1D"`), the calendar raster also includes weekends and public holidays. Set `"merge_trading_days_only": true` in the configuration so rows with an empty primary `close` are dropped after the join (see `merge_data_sources` in `common/utils.py`). The A-share sample config enables this by default.
 
 Execute the merge script as follows:
 

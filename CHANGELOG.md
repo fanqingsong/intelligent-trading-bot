@@ -2,6 +2,11 @@
 
 * v0.8.dev
   * Added MT5 integration
+  * Added China A-share (`venue: ashare`) daily data via akshare (Sina primary, East Money chunk fallback)
+  * Added `configs/config-ashare-1d.jsonc` and Web UI **Analyze** one-click flow (code or Chinese name typeahead → full offline pipeline)
+  * Added `GET /api/analyze/suggest`, `POST /api/analyze`, `GET /api/analyze/result`
+  * Added `merge_trading_days_only` to drop non-trading calendar rows after merge
+  * Dev Web UI port mapped to `5174` when `5173` is occupied
 
 * v0.7.0 (2025-04-27)
   * introduce a generic format for output functions like notifiers and traders

@@ -21,12 +21,13 @@ The most important parameters are listed below:
   - `data_folder`: Path to the directory containing all data files for this analysis.
   - `model_folder`: Path to the directory where ML models produced during training are stored.
 - Data providers:
-  - `venue`: Name of the data provider and its corresponding connector. Currently supported values: `binance`, `yahoo`, `mt5`.
-  - `api_key` and `api_secret`: Credentials for the selected venue. These are passed directly to the connector.
+  - `venue`: Name of the data provider and its corresponding connector. Currently supported values: `binance`, `yahoo`, `mt5`, `ashare`.
+  - `api_key` and `api_secret`: Credentials for the selected venue (Binance). Not required for `ashare`.
   - `client_args`: Dictionary of arbitrary arguments passed to the data connector.
   - `time_column`: Column name used for timestamps (defaults to `"timestamp"`).
+  - `merge_trading_days_only`: If `true`, drop rows with an empty primary `close` after merge (useful for A-share daily calendars). Defaults to `false`. See [ashare.md](ashare.md).
 - Output:
-  - `telegram_bot_token` and `telegram_chat_id`: Credentials used by the Telegram output adapter to send notifications.
+  - `telegram_bot_token` and `telegram_chat_id`: Credentials used by the Telegram output adapter to send notifications. Optional for A-share one-click analysis (local simulation only).
 
 ## Analysis table parameters
 
