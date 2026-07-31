@@ -1,13 +1,12 @@
-# Lighter ML deps for pipeline/trader containers (skip tensorflow for faster builds).
+# Lighter ML deps for pipeline containers (skip tensorflow for faster builds).
 # Install full requirements.txt locally if neural-net classifiers are needed.
 apscheduler
-click
 tqdm
 numpy==2.*
 pandas==2.*
 pyarrow
-python-binance==1.0.*
 akshare
+dateparser
 numba
 ta-lib
 scikit-learn==1.8.*

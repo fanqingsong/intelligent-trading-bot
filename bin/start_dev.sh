@@ -9,11 +9,10 @@ cd "${ROOT_DIR}"
 mkdir -p "${ROOT_DIR}/data"
 
 if [[ ! -f "${ROOT_DIR}/configs/config-dev.jsonc" ]]; then
-  echo "Creating configs/config-dev.jsonc from sample..."
-  cp "${ROOT_DIR}/configs/config-sample-1h.jsonc" "${ROOT_DIR}/configs/config-dev.jsonc"
-  # Point data_folder to local ./data for docker mounts
-  sed -i 's|"data_folder": "C:/DATA_ITB"|"data_folder": "/app/data"|' "${ROOT_DIR}/configs/config-dev.jsonc" \
-    || sed -i '' 's|"data_folder": "C:/DATA_ITB"|"data_folder": "/app/data"|' "${ROOT_DIR}/configs/config-dev.jsonc"
+  echo "Creating configs/config-dev.jsonc from A-share sample..."
+  cp "${ROOT_DIR}/configs/config-ashare-1d.jsonc" "${ROOT_DIR}/configs/config-dev.jsonc"
+  sed -i 's|"data_folder": "[^"]*"|"data_folder": "/app/data"|' "${ROOT_DIR}/configs/config-dev.jsonc" \
+    || sed -i '' 's|"data_folder": "[^"]*"|"data_folder": "/app/data"|' "${ROOT_DIR}/configs/config-dev.jsonc"
 fi
 
 echo "Starting intelligent-trading-bot microservices (dev, hot-reload)..."
@@ -25,8 +24,7 @@ echo "  Web UI:    http://localhost:5174"
 echo "  API:       http://localhost:8000"
 echo "  API docs:  http://localhost:8000/docs"
 echo "  Pipeline:  http://localhost:8001"
-echo "  Trader:    http://localhost:8002"
 echo "  Redis:     localhost:6379"
 echo ""
-echo "Hot reload is enabled for api / pipeline / trader / web."
+echo "Hot reload is enabled for api / pipeline / web."
 echo "Stop with: bin/stop_dev.sh"

@@ -1,5 +1,4 @@
 apscheduler
-click
 tqdm
 
 numpy==2.*  # version limited by tensorflow and numba
@@ -7,11 +6,8 @@ pandas==2.*  # version might be important for parsing timestamps
 pyarrow  # If parquet is used. Alternatively fastparquet
 
 # Downloaders/connectors
-python-binance==1.0.*
 akshare
-#yfinance
-#curl-cffi  # Used in yahoo downloder
-#MetaTrader5>=5.0.4874; sys_platform == 'win32'  # If mt5 venue is used
+dateparser
 
 # Features/label generation
 numba  # For highlow label generator
@@ -23,5 +19,3 @@ scikit-learn==1.8.*
 lightgbm==4.*
 tensorflow==2.20.*
 keras==3.13.*
-
-# seaborn  # if outputs with diagrams are used

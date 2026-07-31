@@ -13,7 +13,7 @@ The most important parameters are listed below:
 - General parameters:
   - `symbol`: Used primarily as the subfolder name for all generated files within the `data_folder`.
   - `description`: A textual description of this configuration. It can be consumed by various pluggable components, such as text or visual output adapters.
-  - `freq`: Data frequency in `pandas` format (e.g., `1h` for hourly data or `1min` for minutely data).
+  - `freq`: Data frequency in `pandas` format (A-share sample uses `1D`).
   - `train`: Boolean flag specifying whether the analysis runs in train (`true`) or predict (`false`) mode.
     If `true`, all trainable features will fit their models using historical data.
     If `false`, existing models will be loaded for prediction.
@@ -21,13 +21,11 @@ The most important parameters are listed below:
   - `data_folder`: Path to the directory containing all data files for this analysis.
   - `model_folder`: Path to the directory where ML models produced during training are stored.
 - Data providers:
-  - `venue`: Name of the data provider and its corresponding connector. Currently supported values: `binance`, `yahoo`, `mt5`, `ashare`.
-  - `api_key` and `api_secret`: Credentials for the selected venue (Binance). Not required for `ashare`.
-  - `client_args`: Dictionary of arbitrary arguments passed to the data connector.
+  - `venue`: Data provider connector. Currently supported: `ashare` (China A-shares via akshare).
   - `time_column`: Column name used for timestamps (defaults to `"timestamp"`).
-  - `merge_trading_days_only`: If `true`, drop rows with an empty primary `close` after merge (useful for A-share daily calendars). Defaults to `false`. See [ashare.md](ashare.md).
+  - `merge_trading_days_only`: If `true`, drop rows with an empty primary `close` after merge (required for A-share daily calendars). Defaults to `false`. See [ashare.md](ashare.md).
 - Output:
-  - `telegram_bot_token` and `telegram_chat_id`: Credentials used by the Telegram output adapter to send notifications. Optional for A-share one-click analysis (local simulation only).
+  - Use `output_sets` with `trader_simulation` for local buy/sell simulation (no live trading).
 
 ## Analysis table parameters
 

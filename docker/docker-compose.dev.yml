@@ -15,7 +15,6 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - PIPELINE_URL=http://pipeline:8001
-      - TRADER_URL=http://trader:8002
       - CONFIG_PATH=configs/config-dev.jsonc
       - DATA_FOLDER=/app/data
       - PYTHONPATH=/app
@@ -26,11 +25,10 @@ services:
     depends_on:
       - redis
       - pipeline
-      - trader
     command: >
-      uvicorn apps.api.main:app
+      uvicorn backend.main:app
       --host 0.0.0.0 --port 8000
-      --reload --reload-dir /app/apps --reload-dir /app/common --reload-dir /app/service
+      --reload --reload-dir /app/backend --reload-dir /app/shared --reload-dir /app/pipeline
 
   pipeline:
     build:
@@ -50,32 +48,9 @@ services:
     depends_on:
       - redis
     command: >
-      uvicorn apps.pipeline.main:app
+      uvicorn pipeline.main:app
       --host 0.0.0.0 --port 8001
-      --reload --reload-dir /app/apps --reload-dir /app/scripts --reload-dir /app/common
-
-  trader:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.trader
-    ports:
-      - "8002:8002"
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - CONFIG_PATH=configs/config-dev.jsonc
-      - DATA_FOLDER=/app/data
-      - PYTHONPATH=/app
-      - TRADER_AUTOSTART=false
-    volumes:
-      - ..:/app
-      - ../data:/app/data
-      - ../configs:/app/configs
-    depends_on:
-      - redis
-    command: >
-      uvicorn apps.trader.main:app
-      --host 0.0.0.0 --port 8002
-      --reload --reload-dir /app/apps --reload-dir /app/service --reload-dir /app/common --reload-dir /app/inputs --reload-dir /app/outputs
+      --reload --reload-dir /app/pipeline --reload-dir /app/shared
 
   web:
     build:
@@ -86,7 +61,7 @@ services:
     environment:
       - VITE_API_BASE=http://localhost:8000
     volumes:
-      - ../apps/web:/app
+      - ../frontend:/app
       - web_node_modules:/app/node_modules
     depends_on:
       - api

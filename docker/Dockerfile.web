@@ -4,10 +4,10 @@ WORKDIR /app
 
 RUN npm config set registry https://registry.npmmirror.com
 
-COPY apps/web/package.json apps/web/package-lock.json* ./
+COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm install
 
-COPY apps/web ./
+COPY frontend ./
 
 EXPOSE 5173
 

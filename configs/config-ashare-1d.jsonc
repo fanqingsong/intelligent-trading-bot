@@ -87,7 +87,7 @@
         }}
     ],
 
-    // === OUTPUTS (local simulation only; no Telegram / live trading) ===
+    // === OUTPUTS (local simulation only; no live trading) ===
 
     "output_sets": [
         {"generator": "trader_simulation", "config": {

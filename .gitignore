@@ -256,8 +256,8 @@ config.json
 
 # Microservice / web
 /data/
-apps/web/node_modules/
-apps/web/dist/
+frontend/node_modules/
+frontend/dist/
 configs/config-dev.jsonc
 *.log
 

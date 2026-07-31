@@ -13,13 +13,10 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
 
 # ta-lib 0.6+ ships manylinux wheels (no local C library compile)
-COPY requirements-services.txt requirements-ml.txt pyproject.toml ./
-COPY common ./common
-COPY inputs ./inputs
-COPY outputs ./outputs
-COPY scripts ./scripts
-COPY service ./service
-COPY apps ./apps
+COPY requirements-services.txt requirements-ml.txt pyproject.toml README.md LICENSE ./
+COPY shared ./shared
+COPY backend ./backend
+COPY pipeline ./pipeline
 
 RUN pip install --no-cache-dir -r requirements-services.txt \
     && pip install --no-cache-dir -r requirements-ml.txt \
@@ -30,4 +27,4 @@ ENV PYTHONPATH=/app
 
 EXPOSE 8001
 
-CMD ["uvicorn", "apps.pipeline.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--reload-dir", "/app"]
+CMD ["uvicorn", "pipeline.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--reload-dir", "/app"]

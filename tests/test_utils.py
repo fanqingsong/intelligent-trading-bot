@@ -1,9 +1,9 @@
 import pytest
 import numpy.testing as npt
 
-from common.utils import *
-from common.utils import add_area_ratio
-from common.gen_signals import *
+from shared.domain.utils import *
+from shared.domain.utils import add_area_ratio
+from shared.domain.gen_signals import *
 
 
 def test_decimal():

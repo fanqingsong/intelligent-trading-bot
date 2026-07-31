@@ -26,7 +26,7 @@ bin/start_dev.sh
 4. Click **Go**
 5. Wait for the pipeline; the page shows BUY / SELL / HOLD from the latest row of `signals.csv`
 
-No exchange API keys or Telegram tokens are required.
+No exchange API keys are required.
 
 ---
 
@@ -51,33 +51,22 @@ flowchart TD
 
 | Step | Script | Main output |
 |------|--------|-------------|
-| 1 download | `scripts/download.py` | `{symbol}/klines.csv` |
-| 2 merge | `scripts/merge.py` | `{symbol}/data.csv` |
-| 3 features | `scripts/features.py` | `{symbol}/features.csv` |
-| 4 labels | `scripts/labels.py` | `{symbol}/matrix.csv` |
-| 5 train | `scripts/train.py` | `{symbol}/MODELS/` |
-| 6 predict | `scripts/predict.py` | `{symbol}/predictions.csv` |
-| 7 signals | `scripts/signals.py` | `{symbol}/signals.csv` |
-| 8 output | `scripts/output.py` | `{symbol}/transactions.txt` (if a flip occurs) |
+| 1 download | `pipeline/steps/download.py` | `{symbol}/klines.csv` |
+| 2 merge | `pipeline/steps/merge.py` | `{symbol}/data.csv` |
+| 3 features | `pipeline/steps/features.py` | `{symbol}/features.csv` |
+| 4 labels | `pipeline/steps/labels.py` | `{symbol}/matrix.csv` |
+| 5 train | `pipeline/steps/train.py` | `{symbol}/MODELS/` |
+| 6 predict | `pipeline/steps/predict.py` | `{symbol}/predictions.csv` |
+| 7 signals | `pipeline/steps/signals.py` | `{symbol}/signals.csv` |
+| 8 output | `pipeline/steps/output.py` | `{symbol}/transactions.txt` (if a flip occurs) |
 
-CLI equivalent (after config is written):
-
-```console
-python -m scripts.download -c configs/config-dev.jsonc
-python -m scripts.merge -c configs/config-dev.jsonc
-python -m scripts.features -c configs/config-dev.jsonc
-python -m scripts.labels -c configs/config-dev.jsonc
-python -m scripts.train -c configs/config-dev.jsonc
-python -m scripts.predict -c configs/config-dev.jsonc
-python -m scripts.signals -c configs/config-dev.jsonc
-python -m scripts.output -c configs/config-dev.jsonc
-```
+Run the same steps from the Web UI **Analyze** page (one-click) or **Pipeline** page (select steps).
 
 ---
 
 ## 1. What data is collected
 
-**Source:** `inputs/collector_ashare.py` via akshare.
+**Source:** `shared/collectors/collector_ashare.py` via akshare.
 
 | Field | Meaning |
 |-------|---------|
@@ -217,7 +206,7 @@ This is a **research / paper signal**, not a broker order. Output step may appen
 
 ## Code and name resolution
 
-Implementation: [`inputs/collector_ashare.py`](../inputs/collector_ashare.py)
+Implementation: [`shared/collectors/collector_ashare.py`](../shared/collectors/collector_ashare.py)
 
 | Helper | Role |
 |--------|------|

@@ -1,7 +1,10 @@
 # Change Log
 
 * v0.8.dev
-  * Added MT5 integration
+  * Reorganized into BS layout: `frontend/`, `backend/`, `pipeline/` (+ `steps/`), `shared/` (domain / collectors / notifiers / runtime)
+  * Removed offline Click CLI; all steps run via Web UI (Analyze / Pipeline / Backtest)
+  * Backtest page shows `signal_models` simulate grid-search results (`GET /api/backtest/results`)
+  * Scoped project to China A-shares only: removed Binance / MT5 / Yahoo / Telegram connectors, online trader service, and crypto sample configs
   * Added China A-share (`venue: ashare`) daily data via akshare (Sina primary, East Money chunk fallback)
   * Added `configs/config-ashare-1d.jsonc` and Web UI **Analyze** one-click flow (code or Chinese name typeahead → full offline pipeline)
   * Added `GET /api/analyze/suggest`, `POST /api/analyze`, `GET /api/analyze/result`

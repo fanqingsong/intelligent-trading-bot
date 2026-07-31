@@ -12,17 +12,14 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
 ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
 
-COPY requirements-services.txt requirements.txt pyproject.toml ./
-COPY common ./common
-COPY inputs ./inputs
-COPY outputs ./outputs
-COPY scripts ./scripts
-COPY service ./service
-COPY apps ./apps
+COPY requirements-services.txt requirements.txt pyproject.toml README.md LICENSE ./
+COPY shared ./shared
+COPY backend ./backend
+COPY pipeline ./pipeline
 
 RUN pip install --no-cache-dir -r requirements-services.txt \
     && pip install --no-cache-dir \
-        click tqdm numpy pandas pyarrow python-binance apscheduler akshare \
+        click tqdm numpy pandas pyarrow apscheduler akshare \
     && pip install --no-cache-dir -e . --no-deps
 
 ENV PYTHONUNBUFFERED=1
@@ -30,4 +27,4 @@ ENV PYTHONPATH=/app
 
 EXPOSE 8000
 
-CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app"]
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app"]

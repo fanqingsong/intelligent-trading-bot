@@ -1,9 +1,9 @@
 import pytest
 import numpy.testing as npt
 
-from common.utils import *
-from common.gen_signals import *
-from common.gen_labels_topbot import *
+from shared.domain.utils import *
+from shared.domain.gen_signals import *
+from shared.domain.gen_labels_topbot import *
 
 def test_extremum_labels():
     data = [10, 30, 50, 70, 90, 70, 50, 30, 9]

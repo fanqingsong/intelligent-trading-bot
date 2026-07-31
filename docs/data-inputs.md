@@ -2,19 +2,14 @@
 
 ## Defining data sources
 
-The intelligent trading bot operates in two modes:
--   **Batch (offline) mode:** Intended for analyzing large historical datasets.
--   **Stream (online) mode:** Intended for generating regular predictions on small increments of new data.
+The intelligent trading bot operates in **batch (offline) mode** for analyzing historical A-share data and generating signals.
 
-In batch mode, historical data must be retrieved for analysis. In stream mode, only the latest data is retrieved and analyzed incrementally. In both cases, the data structure must remain consistent (except in training mode, where labels must also be generated).
-
-Data sources for both modes are specified in the `data_sources` section. Each entry in this section describes a single data source used to retrieve data.
+Data sources are specified in the `data_sources` section. Each entry describes a single source used to retrieve data.
 
 ```jsonc
 "data_sources": [
   {...}, // First data source
-  {...}, // Second data source
-  {...} // Third data source
+  {...}  // Optional additional sources
 ]
 ```
 
@@ -22,57 +17,35 @@ A data source description includes the following attributes:
 
 ```jsonc
 {
-  "folder": "ETHUSDT", // Quote name as defined by the data provider; also serves as the folder name
+  "folder": "600519", // Quote / folder name
   "file": "klines", // Filename for the source data
-  "column_prefix": "etn" // Prefix added to all columns from this data source
+  "column_prefix": "" // Prefix added to all columns from this data source
 }
 ```
 
 The attributes of a data source are interpreted as follows:
 
--   `folder`: This attribute serves two purposes: it specifies the folder where data is stored locally and the quote name (symbol) used to request data from the provider.
--   `file`: The name of the file containing the retrieved data. For example, candlestick data might use `klines`. If not specified, it defaults to the symbol name defined in the `folder` attribute.
--   `column_prefix`: When retrieving multiple symbols, column names often overlap (e.g., open, high, low, close). To distinguish the origin of these columns after merging them into a single DataFrame, use the `column_prefix` attribute. This prefix is applied to every column name from this source during the merge process. Note that the prefix is used only for merging; the original column names in the source file remain unchanged.
+-   `folder`: Local folder name and the quote code used to request data from the provider.
+-   `file`: The name of the file containing the retrieved data (e.g. `klines`). If not specified, it defaults to the symbol name in `folder`.
+-   `column_prefix`: When retrieving multiple symbols, column names often overlap. This prefix is applied to every column name from this source during merge.
 
-Below is an example configuration with two data sources:
+When retrieving data, you must specify the frequency in the `freq` attribute. Values follow the `pandas` offset alias convention. For A-shares use `"1D"`.
 
-```jsonc
-"data_sources": [
-  {"folder": "ETHUSDT", "file": "klines", "column_prefix": ""},
-  {"folder": "ETHBTC", "file": "klines", "column_prefix": "ethbtc"}
-]
-```
+The data provider is specified in the `venue` attribute. Currently supported:
 
-In this example, the first data source retrieves quotes for ETH. The source data is stored in a file named `klines` (the file extension depends on the chosen format). Because no prefix is specified, the columns retain their original names when merged into the main DataFrame. The second data source provides the Ethereum-to-Bitcoin price, which serves as additional analytical data. A column prefix is required here to distinguish its columns from those of the first data source.
-
-When retrieving data, you must specify the frequency (time raster). This frequency applies to all data sources and is defined in the `freq` attribute of the configuration file. Values for this attribute follow the `pandas` offset alias convention: https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases
-
-For example, `h` represents hourly frequency, `min` represents minutely frequency, and `D` represents calendar day frequency. A number preceding the alias indicates the duration of one period (e.g., `15min` means every 15 minutes). This frequency string is subsequently converted to the representation expected by the specific data provider, if supported.
-
-Credentials for accessing the data provider are loaded by the provider-specific component from the configuration file. For Binance, for instance, the `api_key` and `api_secret` attributes are used. Custom arguments for the client are specified in the configuration as a dictionary:
-
-```jsonc
-"client_args": {"tld": "us"} // Connects to the country-specific Binance API server
-```
-
-The data provider is specified in the `venue` attribute. Currently, the following values are supported:
-
--   `binance`: Binance
--   `mt5`: MT5
--   `yahoo`: Yahoo
 -   `ashare`: China A-shares (Shanghai / Shenzhen daily bars via [akshare](https://github.com/akfamily/akshare))
 
 ### A-share (`ashare`) notes
 
 -   **Market:** Shanghai / Shenzhen only (codes starting with `6`/`9` → SH, `0`/`3` → SZ). Beijing Stock Exchange is not included.
--   **Symbols:** Store 6-digit codes in `symbol` and `data_sources[].folder` (e.g. `600519`, `000001`). Avoid exchange suffixes in folder names.
--   **Name resolution:** Helpers in `inputs/collector_ashare.py` load a cached code/name table (`ak.stock_info_a_code_name`, 24h TTL):
+-   **Symbols:** Store 6-digit codes in `symbol` and `data_sources[].folder` (e.g. `600519`, `000001`).
+-   **Name resolution:** Helpers in `shared/collectors/collector_ashare.py` load a cached code/name table (`ak.stock_info_a_code_name`, 24h TTL):
     -   `search_ashare_stocks(query)` — typeahead by code prefix or name substring
     -   `resolve_ashare_query(query)` — resolve a code or unique Chinese name to one code
     -   Web API: `GET /api/analyze/suggest`, `POST /api/analyze` (accepts code or name)
--   **Download:** Batch only (`download_klines`). Prefers Sina daily history (`stock_zh_a_daily`); falls back to East Money year-by-year chunks if needed. Online stream collectors are not implemented.
--   **Frequency:** Use `"1D"`. Set `"merge_trading_days_only": true` so weekends/holidays introduced by a calendar `date_range` are dropped after merge (required for stable daily features).
--   **Sample config:** `configs/config-ashare-1d.jsonc` (day-scale feature windows, local `trader_simulation` output, no Telegram).
+-   **Download:** Batch only (`download_klines`). Prefers Sina daily history (`stock_zh_a_daily`); falls back to East Money year-by-year chunks if needed.
+-   **Frequency:** Use `"1D"`. Set `"merge_trading_days_only": true` so weekends/holidays introduced by a calendar `date_range` are dropped after merge.
+-   **Sample config:** `configs/config-ashare-1d.jsonc` (local `trader_simulation` output).
 -   **UI:** Analyze home page — enter code or name, select a suggestion, click **Go**.
 -   **Guide:** [ashare.md](ashare.md)
 
@@ -80,39 +53,23 @@ The data provider is specified in the `venue` attribute. Currently, the followin
 
 The `download` script retrieves data from the configured data sources and stores it in the corresponding files. Currently, CSV format is used. If the target file already exists, only the latest data is retrieved and appended; existing rows are overwritten in case of overlap. If the file does not exist, the maximum available history is retrieved. The maximum stored size is controlled by the `download_max_rows` attribute.
 
-Execute the downloader script as follows:
-
-```console
-python -m scripts.download -c config.json
-```
-
-If the configuration file defines two data sources with the required attributes, the script will download two files and store them in their respective folders.
+Run **download** from the Web UI **Pipeline** (or **Analyze** for the full chain).
 
 ## Merging data sources
 
-Downloaded data from different sources is not used in isolation. Instead, it is merged into a single table via a merge procedure implemented in both the merge script and the server. The merge procedure has two primary goals:
+Downloaded data from different sources is merged into a single table. The merge procedure:
 
--   Generate a continuous time raster based on the configured frequency to prevent gaps in the source data.
--   Append all source data (columns) to this table by aligning rows with the generated raster.
+-   Generates a continuous time raster based on the configured frequency
+-   Appends all source columns by aligning rows with the generated raster
 
-For daily A-share data (`freq: "1D"`), the calendar raster also includes weekends and public holidays. Set `"merge_trading_days_only": true` in the configuration so rows with an empty primary `close` are dropped after the join (see `merge_data_sources` in `common/utils.py`). The A-share sample config enables this by default.
+For daily A-share data (`freq: "1D"`), the calendar raster also includes weekends and public holidays. Set `"merge_trading_days_only": true` so rows with an empty primary `close` are dropped after the join (see `merge_data_sources` in `shared/domain/utils.py`). The A-share sample config enables this by default.
 
-Execute the merge script as follows:
-
-```console
-python -m scripts.merge -c config.json
-```
-
-The result is saved as a single file containing data from all sources. The output filename (and format) is specified in the `merge_file_name` attribute of the configuration file. For example, to store the merged data in Parquet format, use: `"merge_file_name": "data.parquet"`.
-
-In online mode, the server merges data for each new request (e.g., every minute) after retrieving chunks from all data sources. This merged data is then appended to the analyzer's main DataFrame. Columns from the merged table can be referenced in [feature definitions](features.md).
+Run **merge** from the Web UI **Pipeline**. The result is saved as a single file; the output filename is specified in `merge_file_name` (e.g. `"merge_file_name": "data.parquet"`).
 
 ## Implementing a custom data collector
 
-To implement a new custom data collector for a specific data provider, perform the following steps:
+To implement a new custom data collector:
 
--   Add a new entry to the `Venue` enumerator.
--   Implement the provider-specific functions responsible for data retrieval: `fetch_klines`, `health_check`, and `download_klines`.
--   Return these functions from the dispatcher functions `get_collector_functions` and `get_download_functions`.
-
-The server dynamically locates these functions based on the venue specified in the configuration. It uses them to incrementally retrieve data, merge it, append it to the main DataFrame, and perform analysis.
+-   Add a new entry to the `Venue` enumerator
+-   Implement `download_klines` for batch download
+-   Return it from `get_download_functions` in `shared/collectors/__init__.py`

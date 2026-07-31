@@ -123,7 +123,7 @@ In this case, the `generator` attribute in the feature definition must be a full
 Here is an example of a custom feature definition:
 ```jsonc
 {
-  "generator": "common.my_feature_example:my_feature_example",
+  "generator": "shared.domain.my_feature_example:my_feature_example",
   "column_prefix": "", "feature_prefix": "",
   "config":  {"columns": "close", "function": "add", "parameter": 2.0, "names": "close_add"}
 }

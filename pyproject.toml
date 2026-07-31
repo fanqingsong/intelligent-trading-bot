@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "intelligent-trading-bot"
 version = "0.8.dev"
-description = "Intelligent Trading Bot - Core library, scripts and a simple server"
+description = "Intelligent Trading Bot - A-share ML analysis pipeline and web UI"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -13,12 +13,12 @@ license-files = ["LICENSE"]
 authors = [
     {name = "Alexandr Savinov", email = "savinov@conceptoriented.org"}
 ]
-keywords = ["machine-learning", "crypto", "bitcoin", "trading", "artificial-intelligence", "cryptocurrency", "feature-engineering", "algorithmic-trading", "crypto-trading", "trading-bots"]
+keywords = ["machine-learning", "ashare", "trading", "feature-engineering", "algorithmic-trading", "stock-analysis"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
@@ -28,14 +28,12 @@ classifiers = [
 
 dependencies = [
     "apscheduler",
-    "click",
     "tqdm",
 
     "numpy==2.*",
     "pandas==2.*",
     "pyarrow",
 
-    "python-binance==1.0.*",
     "akshare",
 
     "numba",
@@ -61,12 +59,17 @@ Repository = "https://github.com/asavinov/intelligent-trading-bot"
 "Bug Tracker" = "https://github.com/asavinov/intelligent-trading-bot/issues"
 
 [tool.setuptools]
-packages = ["common", "inputs", "outputs", "scripts", "service", "apps", "apps.api", "apps.pipeline", "apps.trader"]
+packages = [
+    "shared",
+    "shared.domain",
+    "shared.collectors",
+    "shared.notifiers",
+    "shared.runtime",
+    "backend",
+    "pipeline",
+    "pipeline.steps",
+]
 include-package-data = false
-
-#[tool.setuptools.packages.find]
-#include = ["common", "inputs", "outputs", "scripts", "service"]
-#exclude = ["tests", "tests.*"]
 
 # Optional: dynamic version from __version__ or git tag (needs setuptools-scm)
 # [tool.setuptools.dynamic]
