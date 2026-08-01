@@ -1,0 +1,55 @@
+# Base parameters — mirror shared/runtime/App.py defaults.
+# At runtime the pipeline worker passes the parsed configs/*.jsonc as
+# `extra_params`, which override everything here. So this file holds the
+# defaults (file-name conventions, column names, MLflow settings) that the
+# jsonc files normally do not redeclare.
+
+# ---- Conventions: file names and column names ----
+merge_file_name: data.csv
+feature_file_name: features.csv
+matrix_file_name: matrix.csv
+predict_file_name: predictions.csv
+signal_file_name: signals.csv
+signal_models_file_name: signal_models
+
+time_column: timestamp
+
+# ---- File locations (overridden at runtime: DATA_FOLDER env / jsonc) ----
+data_folder: /app/data
+symbol: "600519"
+freq: 1D
+
+# ---- Venue / data sources (overridden by jsonc) ----
+venue: ashare
+data_sources: []
+
+# ---- Feature / label / train configuration (overridden by jsonc) ----
+feature_sets: []
+label_sets: []
+train_feature_sets: []
+train_features: []
+labels: []
+algorithms: []
+
+label_horizon: 0
+train_length: 0
+features_horizon: 10
+predict_length: 60
+append_overlap_records: 5
+
+# ---- Signals / trading / simulation (overridden by jsonc) ----
+signal_sets: []
+output_sets: []
+trade_model: {}
+simulate_model: {}
+rolling_predict: {}
+
+# ---- MLflow model registry (model_store hard cut cut) ----
+# model_folder kept for logging/back-compat (points to local artifact cache).
+model_folder: MODELS
+mlflow_tracking_uri: http://localhost:5000   # docker: http://mlflow:5000 (set via env)
+mlflow_experiment_name: itb_default           # runtime overrides per symbol
+mlflow_registry_prefix: "itb_"                # registered model = prefix + <label>_<algo>
+mlflow_default_alias: Production              # alias promoted on each new version
+mlflow_log_input_example: true                # log a sample input + signature with each model
+mlflow_eval_split: in_sample                  # metric provenance tag (in_sample by default)

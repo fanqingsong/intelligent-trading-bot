@@ -1,0 +1,24 @@
+# Global defaults (catalog-templating layer).
+# The pipeline worker passes the parsed configs/*.jsonc (merged with App.config
+# defaults) as Kedro runtime_params, which override these via the
+# `${runtime_params:key, ${globals:key}}` resolver used in catalog.yml.
+
+data_folder: /app/data
+symbol: "600519"
+
+merge_file_name: data.csv
+feature_file_name: features.csv
+matrix_file_name: matrix.csv
+predict_file_name: predictions.csv
+signal_file_name: signals.csv
+signal_models_file_name: signal_models
+
+time_column: timestamp
+
+# MLflow (model_store hard cut). Tracking URI overridden by env in docker.
+mlflow_tracking_uri: http://localhost:5000
+mlflow_experiment_name: itb_default
+mlflow_registry_prefix: "itb_"
+mlflow_default_alias: Production
+mlflow_log_input_example: true
+mlflow_eval_split: in_sample

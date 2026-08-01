@@ -5,7 +5,6 @@ import re
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 
@@ -314,10 +313,12 @@ def download_klines(config, data_sources):
     """
     Batch download daily klines for each data source.
 
-    ``data_sources[].folder`` must be a 6-digit A-share code (also used as local folder name).
+    ``data_sources[].folder`` must be a 6-digit A-share code.
+    Rows are stored in Postgres ``market_frames`` (kind=klines).
     """
+    from shared.db.frames import load_frame, save_frame
+
     time_column = config["time_column"]
-    data_path = Path(config["data_folder"])
     download_max_rows = config.get("download_max_rows", 0)
 
     for ds in data_sources:
@@ -332,34 +333,30 @@ def download_klines(config, data_sources):
             print(f"ERROR. {e}")
             continue
 
-        file = ds.get("file", quote) or quote
         print(f"Start downloading A-share '{symbol}' ({ashare_exchange(symbol)}) ...")
 
-        file_path = data_path / symbol
-        file_path.mkdir(parents=True, exist_ok=True)
-        file_name = (file_path / file).with_suffix(".csv")
-
-        if file_name.is_file():
-            df = pd.read_csv(file_name, parse_dates=[time_column], date_format="ISO8601")
-            df[time_column] = pd.to_datetime(df[time_column], errors="coerce").dt.date
+        df = load_frame(symbol, "klines", time_column=time_column)
+        if not df.empty:
+            df[time_column] = pd.to_datetime(df[time_column], errors="coerce", utc=True)
             last_date = df.iloc[-1][time_column]
-            # Overlap a few calendar days to rewrite last bars if adjusted
             start = (pd.Timestamp(last_date) - pd.Timedelta(days=10)).strftime("%Y%m%d")
             new_df = _fetch_daily(symbol, start_date=start)
             if time_column != "timestamp":
                 new_df = new_df.rename(columns={"timestamp": time_column})
+            new_df[time_column] = pd.to_datetime(new_df[time_column], errors="coerce", utc=True)
             df = pd.concat([df, new_df])
             df = df.drop_duplicates(subset=[time_column], keep="last")
         else:
-            print("File not found. Full fetch...")
+            print("No existing klines in DB. Full fetch...")
             df = _fetch_daily(symbol)
             if time_column != "timestamp":
                 df = df.rename(columns={"timestamp": time_column})
+            df[time_column] = pd.to_datetime(df[time_column], errors="coerce", utc=True)
             print("Full fetch finished.")
 
         df = df.sort_values(by=time_column)
         if download_max_rows:
             df = df.tail(download_max_rows)
 
-        df.to_csv(file_name, index=False)
-        print(f"Finished downloading '{symbol}'. Stored {len(df)} rows in '{file_name}'")
+        n = save_frame(symbol, "klines", df, time_column=time_column, replace=True)
+        print(f"Finished downloading '{symbol}'. Stored {n} rows in Postgres (klines)")

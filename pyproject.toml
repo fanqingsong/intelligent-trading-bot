@@ -43,6 +43,18 @@ dependencies = [
     "lightgbm==4.*",
     "tensorflow==2.20.*",
     "keras==3.13.*",
+
+    # Orchestration + model registry
+    "kedro>=0.19.13,<0.20",
+    "kedro-datasets[pandas]>=3.0,<4",  # CSVDataSet / ParquetDataSet / PartitionedDataSet
+    # MLflow 3 LoggedModels power the experiment Models tab; keep client≈server.
+    # kedro-mlflow is unused (hooks disabled in settings.py) and 0.14 pins mlflow<3.
+    "mlflow>=3.1,<4",
+
+    # Persistence
+    "sqlalchemy==2.*",
+    "psycopg[binary]==3.*",
+    "alembic==1.*",
 ]
 
 [project.optional-dependencies]
@@ -58,19 +70,36 @@ Documentation = "https://github.com/asavinov/intelligent-trading-bot"
 Repository = "https://github.com/asavinov/intelligent-trading-bot"
 "Bug Tracker" = "https://github.com/asavinov/intelligent-trading-bot/issues"
 
+[tool.kedro]
+package_name = "kedro_pipeline"
+project_name = "intelligent-trading-bot"
+kedro_init_version = "0.19.19"
+source_dir = "."
+
 [tool.setuptools]
 packages = [
     "shared",
-    "shared.domain",
     "shared.collectors",
-    "shared.notifiers",
-    "shared.runtime",
+    "shared.db",
     "backend",
-    "pipeline",
-    "pipeline.steps",
+    "backend.db",
+    "kedro_pipeline",
+    "kedro_pipeline.nodes",
+    "kedro_pipeline.features",
+    "kedro_pipeline.labels",
+    "kedro_pipeline.classifiers",
+    "kedro_pipeline.signals",
+    "kedro_pipeline.backtesting",
+    "kedro_pipeline.orchestration",
+    "kedro_pipeline.common",
+    "kedro_pipeline.catalog",
+    "kedro_pipeline.worker",
 ]
 include-package-data = false
 
 # Optional: dynamic version from __version__ or git tag (needs setuptools-scm)
 # [tool.setuptools.dynamic]
 # version = {attr = "my_awesome_package.__version__"}
+
+[tool.kedro_telemetry]
+project_id = "7c1153400eac436b98e9a2ea893510fb"

@@ -1,0 +1,52 @@
+# DataCatalog for the ITB Kedro project.
+#
+# Pipeline tables live in Postgres ``market_frames`` (symbol + kind + ts + payload).
+# Paths use the `${runtime_params:key, ${globals:key}}` resolver so per-job
+# config_overrides (symbol etc.) update locations without editing this file.
+
+# === Postgres datasets (data_folder/symbol tables → market_frames) ===
+
+merged_data:
+  type: kedro_pipeline.catalog.datasets.PostgresTableDataSet
+  symbol: ${runtime_params:symbol, ${globals:symbol}}
+  kind: data
+  time_column: ${runtime_params:time_column, ${globals:time_column}}
+
+features_data:
+  type: kedro_pipeline.catalog.datasets.PostgresTableDataSet
+  symbol: ${runtime_params:symbol, ${globals:symbol}}
+  kind: features
+  time_column: ${runtime_params:time_column, ${globals:time_column}}
+
+matrix_data:
+  type: kedro_pipeline.catalog.datasets.PostgresTableDataSet
+  symbol: ${runtime_params:symbol, ${globals:symbol}}
+  kind: matrix
+  time_column: ${runtime_params:time_column, ${globals:time_column}}
+
+predictions:
+  type: kedro_pipeline.catalog.datasets.PostgresTableDataSet
+  symbol: ${runtime_params:symbol, ${globals:symbol}}
+  kind: predictions
+  time_column: ${runtime_params:time_column, ${globals:time_column}}
+
+signals_data:
+  type: kedro_pipeline.catalog.datasets.PostgresTableDataSet
+  symbol: ${runtime_params:symbol, ${globals:symbol}}
+  kind: signals
+  time_column: ${runtime_params:time_column, ${globals:time_column}}
+
+# === Raw downloaded sources ===
+# download is a side-effect node (writes klines into Postgres); the
+# MemoryDataset just carries a sentinel to enforce download→merge ordering.
+raw_sources:
+  type: MemoryDataset
+
+# === Trained models (in-memory dict from train → predict within one run) ===
+# Persistence to the MLflow registry happens inside the train/predict_rolling
+# nodes via ModelStore.put_model_pair; predict re-loads from MLflow so a job
+# that skips train still resolves models.
+trained_models:
+  type: MemoryDataset
+
+# === Simulation results (phase 4: append .txt written inside simulate node) ===

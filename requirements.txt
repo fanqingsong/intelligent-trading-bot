@@ -5,6 +5,11 @@ numpy==2.*  # version limited by tensorflow and numba
 pandas==2.*  # version might be important for parsing timestamps
 pyarrow  # If parquet is used. Alternatively fastparquet
 
+# Persistence
+sqlalchemy==2.*
+psycopg[binary]==3.*
+alembic==1.*
+
 # Downloaders/connectors
 akshare
 dateparser

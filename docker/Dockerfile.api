@@ -15,7 +15,7 @@ ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
 COPY requirements-services.txt requirements.txt pyproject.toml README.md LICENSE ./
 COPY shared ./shared
 COPY backend ./backend
-COPY pipeline ./pipeline
+COPY kedro_pipeline ./kedro_pipeline
 
 RUN pip install --no-cache-dir -r requirements-services.txt \
     && pip install --no-cache-dir \

@@ -1,4 +1,4 @@
-"""Shared helpers used by backend and pipeline services."""
+"""Cross-service contract: config helpers, step presets, paths."""
 from __future__ import annotations
 
 import json
@@ -68,9 +68,42 @@ PIPELINE_STEPS = [
     "output",
 ]
 
+# Manual model update: full refresh including train, then predict/signals.
+TRAIN_UPDATE_STEPS = [
+    "download",
+    "merge",
+    "features",
+    "labels",
+    "train",
+    "predict",
+    "signals",
+]
+
+# Daily / scheduled inference: skip train, reuse MLflow models.
+DAILY_PREDICT_STEPS = [
+    "download",
+    "merge",
+    "features",
+    "labels",
+    "predict",
+    "signals",
+]
+
 BACKTEST_STEPS = [
     "predict_rolling",
     "simulate",
 ]
 
 ALL_STEPS = PIPELINE_STEPS + BACKTEST_STEPS
+
+
+def symbol_config_overrides(symbol: str) -> dict:
+    """Per-symbol runtime overrides (no mutation of the shared jsonc file)."""
+    code = str(symbol).zfill(6)
+    return {
+        "symbol": code,
+        "description": f"A-share {code} watchlist run",
+        "data_sources": [{"folder": code, "file": "klines", "column_prefix": ""}],
+        "mlflow_registry_prefix": f"itb_{code}_",
+        "mlflow_experiment_name": f"itb_{code}",
+    }

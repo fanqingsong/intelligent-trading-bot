@@ -1,5 +1,4 @@
-# Lighter ML deps for pipeline containers (skip tensorflow for faster builds).
-# Install full requirements.txt locally if neural-net classifiers are needed.
+# ML deps for pipeline containers (includes nn classifier stack).
 apscheduler
 tqdm
 numpy==2.*
@@ -11,4 +10,15 @@ numba
 ta-lib
 scikit-learn==1.8.*
 lightgbm==4.*
+tensorflow==2.20.*
+keras==3.13.*
 joblib
+sqlalchemy==2.*
+psycopg[binary]==3.*
+alembic==1.*
+
+# Orchestration + model registry (pipeline container)
+kedro>=0.19.13,<0.20
+kedro-datasets[pandas]>=3.0,<4
+mlflow>=3.1,<4
+kedro-viz>=10,<12  # pipeline DAG UI (compose service: viz)

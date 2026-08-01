@@ -1,48 +1,52 @@
 # Pipeline steps
 
-Offline analysis is a file-based multi-step pipeline. Each step loads an input file, processes it, and writes an output file. Steps are executed by the **pipeline worker** and controlled from the Web UI:
+Offline analysis is a Postgres-backed multi-step pipeline. Each Kedro node reads/writes `market_frames` (symbol + kind) unless noted. Jobs are executed by the **pipeline worker** and controlled from the Web UI:
 
-- **Analyze** — run the full pipeline for one A-share
+- **Watchlist** — `train_update` (with train) or `daily_predict` (skip train) for one or many symbols
 - **Pipeline** — run any subset of offline steps with live logs
 - **Backtest** — run `predict_rolling` and/or `simulate`, then view results
 
-Underlying step functions live under `pipeline/steps/` (`run_download`, `run_merge`, …) and are not exposed as a CLI.
+Node implementations live under `kedro_pipeline/nodes/` (`inference.py`, `backtest.py`); domain logic sits in sibling packages (`features`, `labels`, `classifiers`, `signals`, `backtesting`, `orchestration`). There is no CLI entry point for individual steps.
 
 ## Step overview
 
 | Step | UI | Input → Output |
 |------|----|----------------|
-| `download` | Analyze / Pipeline | data sources → `{symbol}/klines.csv` |
-| `merge` | Analyze / Pipeline | source files → `merge_file_name` (`data.csv`) |
-| `features` | Analyze / Pipeline | merged data → `feature_file_name` (`features.csv`) |
-| `labels` | Analyze / Pipeline | features → `matrix_file_name` (`matrix.csv`) |
-| `train` | Analyze / Pipeline | matrix → `{symbol}/MODELS/` |
-| `predict` | Analyze / Pipeline | matrix + models → `predict_file_name` (`predictions.csv`) |
-| `signals` | Analyze / Pipeline | predictions → `signal_file_name` (`signals.csv`) |
-| `output` | Analyze / Pipeline | signals → adapters (e.g. `trader_simulation` → `transactions.txt`) |
-| `predict_rolling` | Backtest | matrix → walk-forward `predictions.csv` (+ `.txt` metrics) |
-| `simulate` | Backtest | predictions → `signal_models_file_name` (`.txt` grid search) |
+| `download` | Watchlist / Pipeline | data sources → Postgres `klines` |
+| `merge` | Watchlist / Pipeline | `klines` → Postgres `data` |
+| `features` | Watchlist / Pipeline | `data` → Postgres `features` (+ optional `.txt` sidecar) |
+| `labels` | Watchlist / Pipeline | `features` → Postgres `matrix` |
+| `train` | Watchlist train / Pipeline | `matrix` → MLflow Model Registry (`itb_{symbol}_*`) |
+| `predict` | Watchlist / Pipeline | `matrix` + models → Postgres `predictions` |
+| `signals` | Watchlist / Pipeline | `predictions` → Postgres `signals` |
+| `output` | Pipeline | signals → adapters (e.g. `trader_simulation` → `transactions.txt`) |
+| `predict_rolling` | Backtest | walk-forward predictions; each step logs a new MLflow version tagged `rolling_step` |
+| `simulate` | Backtest | signals → `signal_models.txt` grid search |
 
-File names are configured via:
+Logical file names in config (`merge_file_name`, etc.) remain for sidecar path resolution; table payloads live in Postgres.
 
-- `merge_file_name`, `feature_file_name`, `matrix_file_name`
-- `predict_file_name`, `signal_file_name`, `signal_models_file_name`
+## Job presets
 
-The file extension determines the format (CSV or Parquet).
+| Kind | Steps | Trigger |
+|------|--------|---------|
+| `train_update` | download → … → train → predict → signals | Watchlist「更新模型」 |
+| `daily_predict` | download → … → predict → signals (no train) | 「一键预测」/ post-market schedule |
+
+Jobs accept `config_overrides` (symbol, data_sources, mlflow prefix) so the shared JSONC template is not rewritten per symbol.
 
 ## Download and merge
 
-`download` retrieves data from `data_sources`. For A-shares set `"venue": "ashare"` and a 6-digit `folder` (see `configs/config-ashare-1d.jsonc` and [ashare.md](ashare.md)). Existing files are appended with the latest missing rows.
+`download` retrieves A-share daily bars (`venue: ashare`) and upserts Postgres `klines`. Existing history is appended with a short overlap window.
 
-`merge` joins all sources into one table under the `symbol` folder, aligning rows to `freq`. Use `merge_trading_days_only: true` for daily A-share calendars.
+`merge` joins sources onto `freq`, optionally with `merge_trading_days_only: true`.
 
 ## Features, labels, train, predict, signals
 
-- **features** — evaluate `feature_sets` → `feature_file_name`
-- **labels** — evaluate `label_sets` → `matrix_file_name`
-- **train** — fit models from `train_feature_sets` → `MODELS/`
-- **predict** — apply trained models → `predict_file_name` (+ metrics `.txt`)
-- **signals** — evaluate `signal_sets` → `signal_file_name`
+- **features** — evaluate `feature_sets`
+- **labels** — evaluate `label_sets`
+- **train** — fit `train_feature_sets` × algorithms → MLflow
+- **predict** — apply trained models
+- **signals** — per-algorithm thresholds + `majority_vote`
 
 ## Outputs
 
@@ -52,21 +56,8 @@ The file extension determines the format (CSV or Parquet).
 
 ### `predict_rolling`
 
-Walk-forward train/predict that mimics live deployment: train on history, predict a short forward window, advance, repeat. Parameters live in `rolling_predict`:
-
-- `data_start` / `data_end`
-- `prediction_start`, `prediction_size`, `prediction_steps`
-- `use_multiprocessing`, `max_workers`
+Walk-forward train/predict. Parameters live in `rolling_predict`.
 
 ### `simulate`
 
-Grid-search trade thresholds on (preferably rolling) predictions. Parameters live in `simulate_model`:
-
-- `data_start` / `data_end`
-- `direction`: `"long"` or `"short"`
-- `topn_to_store`
-- `signal_generator`
-- `buy_sell_equal`
-- `grid.buy_signal_threshold` / `grid.sell_signal_threshold` (lists or Python expressions)
-
-Results append to `{symbol}/signal_models.txt` and are shown on the **Backtest** page.
+Grid-search trade thresholds on existing signals. Parameters live in `simulate_model`. Results append to `{symbol}/signal_models.txt` and are shown on the **Backtest** page.

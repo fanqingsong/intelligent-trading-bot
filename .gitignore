@@ -258,7 +258,13 @@ config.json
 /data/
 frontend/node_modules/
 frontend/dist/
+frontend/tsconfig.tsbuildinfo
 configs/config-dev.jsonc
 *.log
+
+# Local runtime artifacts
+mlruns/
+.viz/
+.kedro/
 
 .venv/

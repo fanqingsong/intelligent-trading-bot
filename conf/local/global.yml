@@ -1,0 +1,4 @@
+# Local dev overrides.
+# MLflow tracking URI for local (non-docker) runs; in docker the compose env
+# var MLFLOW_TRACKING_URI wins (the worker sets mlflow_tracking_uri from env).
+mlflow_tracking_uri: http://localhost:5000

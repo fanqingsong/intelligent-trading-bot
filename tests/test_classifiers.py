@@ -1,9 +1,9 @@
 import pytest
 
-from shared.domain.utils import *
-from shared.domain.classifier_gb import train_predict_gb
-from shared.domain.classifier_nn import train_predict_nn
-from shared.domain.classifier_lc import train_predict_lc
+from kedro_pipeline.common.utils import *
+from kedro_pipeline.classifiers.classifier_gb import train_predict_gb
+from kedro_pipeline.classifiers.classifier_nn import train_predict_nn
+from kedro_pipeline.classifiers.classifier_lc import train_predict_lc
 
 def test_nan_handling_predict():
 	"""Predicted input has nans. These nans rows have to be removed before prediction but the output has to contain all rows including these nan rows."""

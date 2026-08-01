@@ -7,7 +7,7 @@
 
     "symbol": "600519",
 
-    "description": "A-share 600519 daily analysis",
+    "description": "A-share watchlist template (multi-algorithm)",
 
     "freq": "1D",
 
@@ -63,27 +63,100 @@
           "algo": "svc",
           "params": {"is_scale": true, "length": 750},
           "train": {"C": 1.0}
+        },
+        {
+          "name": "gb",
+          "algo": "gb",
+          "params": {"is_scale": false, "length": 750},
+          "train": {"objective": "binary", "verbosity": -1, "num_iterations": 80}
+        },
+        {
+          "name": "nn",
+          "algo": "nn",
+          "params": {"is_scale": true, "length": 750, "layers": [32]},
+          "train": {"learning_rate": 0.001, "n_epochs": 8, "bs": 64}
+        },
+        {
+          "name": "lc",
+          "algo": "lc",
+          "params": {"is_scale": true, "length": 750},
+          "train": {"C": 1.0, "max_iter": 500}
         }
     ],
 
-    // === GENERATE SIGNALS ===
+    // === GENERATE SIGNALS (per algorithm + majority vote) ===
 
     "signal_sets": [
         {
             "generator": "combine", "config": {
                 "columns": ["high_30_svc", "low_30_svc"],
-                "names": "trade_score",
+                "names": "trade_score_svc",
                 "combine": "difference",
                 "coefficient": 1.0, "constant": 0.0
         }},
         {
             "generator": "threshold_rule", "config": {
-                "columns": "trade_score",
-                "names": ["buy_signal_column", "sell_signal_column"],
+                "columns": "trade_score_svc",
+                "names": ["buy_signal_svc", "sell_signal_svc"],
                 "parameters": {
                     "buy_signal_threshold": 0.08,
                     "sell_signal_threshold": -0.08
                 }
+        }},
+        {
+            "generator": "combine", "config": {
+                "columns": ["high_30_gb", "low_30_gb"],
+                "names": "trade_score_gb",
+                "combine": "difference",
+                "coefficient": 1.0, "constant": 0.0
+        }},
+        {
+            "generator": "threshold_rule", "config": {
+                "columns": "trade_score_gb",
+                "names": ["buy_signal_gb", "sell_signal_gb"],
+                "parameters": {
+                    "buy_signal_threshold": 0.08,
+                    "sell_signal_threshold": -0.08
+                }
+        }},
+        {
+            "generator": "combine", "config": {
+                "columns": ["high_30_nn", "low_30_nn"],
+                "names": "trade_score_nn",
+                "combine": "difference",
+                "coefficient": 1.0, "constant": 0.0
+        }},
+        {
+            "generator": "threshold_rule", "config": {
+                "columns": "trade_score_nn",
+                "names": ["buy_signal_nn", "sell_signal_nn"],
+                "parameters": {
+                    "buy_signal_threshold": 0.08,
+                    "sell_signal_threshold": -0.08
+                }
+        }},
+        {
+            "generator": "combine", "config": {
+                "columns": ["high_30_lc", "low_30_lc"],
+                "names": "trade_score_lc",
+                "combine": "difference",
+                "coefficient": 1.0, "constant": 0.0
+        }},
+        {
+            "generator": "threshold_rule", "config": {
+                "columns": "trade_score_lc",
+                "names": ["buy_signal_lc", "sell_signal_lc"],
+                "parameters": {
+                    "buy_signal_threshold": 0.08,
+                    "sell_signal_threshold": -0.08
+                }
+        }},
+        {
+            "generator": "majority_vote", "config": {
+                "buy_columns": ["buy_signal_svc", "buy_signal_gb", "buy_signal_nn", "buy_signal_lc"],
+                "sell_columns": ["sell_signal_svc", "sell_signal_gb", "sell_signal_nn", "sell_signal_lc"],
+                "min_votes": 2,
+                "names": ["buy_signal_vote", "sell_signal_vote", "vote_label"]
         }}
     ],
 
@@ -91,8 +164,8 @@
 
     "output_sets": [
         {"generator": "trader_simulation", "config": {
-            "buy_signal_column":"buy_signal_column",
-            "sell_signal_column": "sell_signal_column"
+            "buy_signal_column":"buy_signal_vote",
+            "sell_signal_column": "sell_signal_vote"
         }}
     ],
 

@@ -16,7 +16,8 @@ ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
 COPY requirements-services.txt requirements-ml.txt pyproject.toml README.md LICENSE ./
 COPY shared ./shared
 COPY backend ./backend
-COPY pipeline ./pipeline
+COPY kedro_pipeline ./kedro_pipeline
+COPY conf ./conf
 
 RUN pip install --no-cache-dir -r requirements-services.txt \
     && pip install --no-cache-dir -r requirements-ml.txt \
@@ -27,4 +28,4 @@ ENV PYTHONPATH=/app
 
 EXPOSE 8001
 
-CMD ["uvicorn", "pipeline.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--reload-dir", "/app"]
+CMD ["uvicorn", "kedro_pipeline.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--reload-dir", "/app"]

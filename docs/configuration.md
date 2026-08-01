@@ -11,15 +11,21 @@ Note that not all parameters and sections are required by every script or functi
 The most important parameters are listed below:
 
 - General parameters:
-  - `symbol`: Used primarily as the subfolder name for all generated files within the `data_folder`.
-  - `description`: A textual description of this configuration. It can be consumed by various pluggable components, such as text or visual output adapters.
+  - `symbol`: Primary stock code; also scopes Postgres `market_frames` and MLflow registry prefix `itb_{symbol}_`.
+  - `description`: A textual description of this configuration.
   - `freq`: Data frequency in `pandas` format (A-share sample uses `1D`).
-  - `train`: Boolean flag specifying whether the analysis runs in train (`true`) or predict (`false`) mode.
-    If `true`, all trainable features will fit their models using historical data.
-    If `false`, existing models will be loaded for prediction.
+  - `train`: Boolean flag for train (`true`) vs predict-only (`false`) windowing and whether trainable features fit models.
 - Persistence:
-  - `data_folder`: Path to the directory containing all data files for this analysis.
-  - `model_folder`: Path to the directory where ML models produced during training are stored.
+  - Pipeline tables (klines/data/features/matrix/predictions/signals) are stored in Postgres `market_frames`.
+  - `data_folder`: Local directory for sidecar `.txt` files and optional staging artifacts.
+  - `model_folder`: Local staging path under `{data_folder}/{symbol}/`; authoritative models live in MLflow.
+- MLflow platform (Tracking + Registry):
+  - `mlflow_tracking_uri`: Tracking server URL. In docker the `MLFLOW_TRACKING_URI` env var wins (`http://mlflow:5000`); locally `http://localhost:5000`. The MLflow UI is served at this URL.
+  - `mlflow_experiment_name`: Experiment name, overridden per symbol to `itb_{symbol}`.
+  - `mlflow_registry_prefix`: Registered models are named `{prefix}{label}_{algo}` (default `itb_`, so e.g. `itb_600519_high_30_gb`).
+  - `mlflow_default_alias`: Alias promoted on each new model version (default `Production`). Loading resolves this alias, falling back to the latest version on backends without alias support.
+  - `mlflow_log_input_example`: When `true`, each model is logged with an inferred signature + small input example.
+  - `mlflow_eval_split`: Provenance tag recorded with metrics (default `in_sample` — metrics are computed on the training set; set up a holdout split here in future).
 - Data providers:
   - `venue`: Data provider connector. Currently supported: `ashare` (China A-shares via akshare).
   - `time_column`: Column name used for timestamps (defaults to `"timestamp"`).
@@ -30,7 +36,7 @@ The most important parameters are listed below:
 ## Analysis table parameters
 
 During analysis, all data is represented as a DataFrame configured via the following parameters.
-These parameters define the required shape of the DataFrame and are used primarily by the server:
+These parameters define the required shape of the DataFrame used by offline pipeline nodes:
 
 - `label_horizon`: The minimum number of future rows required to compute a label (i.e., the prediction horizon).
   During training, rows lacking sufficient future data are excluded.

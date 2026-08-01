@@ -1,4 +1,4 @@
-from shared.domain.types import Venue
+from shared.types import Venue
 
 
 def get_download_functions(venue: Venue):

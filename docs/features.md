@@ -123,7 +123,7 @@ In this case, the `generator` attribute in the feature definition must be a full
 Here is an example of a custom feature definition:
 ```jsonc
 {
-  "generator": "shared.domain.my_feature_example:my_feature_example",
+  "generator": "kedro_pipeline.features.my_feature_example:my_feature_example",
   "column_prefix": "", "feature_prefix": "",
   "config":  {"columns": "close", "function": "add", "parameter": 2.0, "names": "close_add"}
 }
@@ -144,3 +144,19 @@ Depending on the operation name, it either adds a constant parameter to the inpu
 The resulting column is appended to the input DataFrame and returned alongside the new feature name.
 
 Note that while the configuration dictionary may have an arbitrary format and attributes, the feature generator must adhere to this specific signature.
+
+## MLflow platform integration
+
+MLflow is used as a first-class MLOps platform across four layers:
+
+- **Tracking.** Every trained `(model, scaler)` pair is logged in its own run with full provenance: algorithm hyperparameters (`params.*`), `train_length`/`n_rows`/`n_features`/`symbol`/`label`/`algo`, plus in-sample metrics (`auc`, `ap`, `f1`, `precision`, `recall`, `mae`, `r2`, …). Runs are tagged with `symbol`/`label`/`algo`/`column` (and `rolling_step` during backtests). Metrics are tagged `eval_split=in_sample` (see [configuration.md](configuration.md)).
+- **Registry.** Each `label_algo` combination is a registered model named `{mlflow_registry_prefix}{label}_{algo}` (e.g. `itb_600519_high_30_gb`). The pair is wrapped in a standard MLflow **pyfunc** (`PairPythonModel`) and logged via `mlflow.pyfunc.log_model(registered_model_name=...)` with an inferred signature and input example. The newest version is promoted to the `Production` alias.
+- **Platform consumption.** Because models are real pyfunc artifacts, any external MLflow client can load and score them directly — no project-specific code needed:
+  ```python
+  import mlflow
+  m = mlflow.pyfunc.load_model("models:/itb_600519_high_30_gb/Production")
+  m.predict(features_df)
+  ```
+- **Control plane.** The API exposes read-only views: `GET /api/mlflow/info`, `/api/mlflow/models`, `/api/mlflow/models/{name}/versions`, `/api/mlflow/runs`. The Models page renders registered models, their latest metrics, and a link to the MLflow UI.
+
+Internally, `ModelStore.get_model_pair` returns the same `PairPythonModel` whether the pair came from the in-memory cache (train→predict within one run) or the registry, so the pipeline is agnostic to the source. The ML stack (lightgbm / sklearn / tensorflow) is only required where models are *trained or loaded* (pipeline worker); the API only queries and therefore pulls in just the `mlflow` client.

@@ -1,5 +1,5 @@
 import { NavLink, Route, Routes } from "react-router-dom";
-import AnalyzePage from "./pages/Analyze";
+import WatchlistPage from "./pages/Watchlist";
 import Dashboard from "./pages/Dashboard";
 import ConfigPage from "./pages/Config";
 import PipelinePage from "./pages/Pipeline";
@@ -8,7 +8,7 @@ import ModelsPage from "./pages/Models";
 import BacktestPage from "./pages/Backtest";
 import SignalsPage from "./pages/Signals";
 
-const primaryLinks = [["/", "Analyze"]] as const;
+const primaryLinks = [["/", "Watchlist"]] as const;
 
 const advancedLinks = [
   ["/dashboard", "Dashboard"],
@@ -26,7 +26,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           Intelligent Trading Bot
-          <span>A-share one-click analysis</span>
+          <span>A-share watchlist signals</span>
         </div>
         <nav className="nav">
           {primaryLinks.map(([to, label]) => (
@@ -44,7 +44,7 @@ export default function App() {
       </aside>
       <main className="main">
         <Routes>
-          <Route path="/" element={<AnalyzePage />} />
+          <Route path="/" element={<WatchlistPage />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/config" element={<ConfigPage />} />
           <Route path="/pipeline" element={<PipelinePage />} />

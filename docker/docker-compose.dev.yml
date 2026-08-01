@@ -6,6 +6,23 @@ services:
     volumes:
       - redis_data:/data
 
+  postgres:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/postgres:16-alpine
+    ports:
+      # Host 5432 is often taken by other local Postgres; containers still use postgres:5432
+      - "127.0.0.1:5433:5432"
+    environment:
+      - POSTGRES_USER=itb
+      - POSTGRES_PASSWORD=itb
+      - POSTGRES_DB=itb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U itb -d itb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   api:
     build:
       context: ..
@@ -17,18 +34,25 @@ services:
       - PIPELINE_URL=http://pipeline:8001
       - CONFIG_PATH=configs/config-dev.jsonc
       - DATA_FOLDER=/app/data
+      - DATABASE_URL=postgresql+psycopg://itb:itb@postgres:5432/itb
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
       - PYTHONPATH=/app
     volumes:
       - ..:/app
       - ../data:/app/data
       - ../configs:/app/configs
+      - mlflow_artifacts:/app/data/mlruns
     depends_on:
-      - redis
-      - pipeline
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      pipeline:
+        condition: service_started
     command: >
       uvicorn backend.main:app
       --host 0.0.0.0 --port 8000
-      --reload --reload-dir /app/backend --reload-dir /app/shared --reload-dir /app/pipeline
+      --reload --reload-dir /app/backend --reload-dir /app/shared --reload-dir /app/kedro_pipeline
 
   pipeline:
     build:
@@ -40,17 +64,43 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CONFIG_PATH=configs/config-dev.jsonc
       - DATA_FOLDER=/app/data
+      - DATABASE_URL=postgresql+psycopg://itb:itb@postgres:5432/itb
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
       - PYTHONPATH=/app
     volumes:
       - ..:/app
       - ../data:/app/data
       - ../configs:/app/configs
+      - mlflow_artifacts:/app/data/mlruns
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
     command: >
-      uvicorn pipeline.main:app
+      uvicorn kedro_pipeline.main:app
       --host 0.0.0.0 --port 8001
-      --reload --reload-dir /app/pipeline --reload-dir /app/shared
+      --reload --reload-dir /app/shared --reload-dir /app/kedro_pipeline
+
+  mlflow:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=sqlite:////mlruns/mlflow.db
+      - MLFLOW_ARTIFACT_ROOT=/mlruns
+    volumes:
+      - mlflow_artifacts:/mlruns
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlruns/mlflow.db
+      --default-artifact-root /mlruns
+      --host 0.0.0.0 --port 5000
+      --allowed-hosts '*'
 
   web:
     build:
@@ -67,6 +117,29 @@ services:
       - api
     command: npm run dev -- --host 0.0.0.0 --port 5173
 
+  # Kedro-Viz: pipeline DAG browser (reuses pipeline image; needs node imports)
+  viz:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.pipeline
+    ports:
+      - "4141:4141"
+    environment:
+      - PYTHONPATH=/app
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - ..:/app
+      - ../data:/app/data
+      - ../configs:/app/configs
+      - ../conf:/app/conf
+    working_dir: /app
+    command: >
+      kedro viz run
+      --host 0.0.0.0 --port 4141
+      --no-browser --autoreload
+
 volumes:
   redis_data:
+  postgres_data:
   web_node_modules:
+  mlflow_artifacts:
