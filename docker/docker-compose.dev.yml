@@ -178,16 +178,18 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - MLFLOW_BACKEND_STORE_URI=sqlite:////mlruns/mlflow.db
+      # Postgres avoids SQLite write locks while train jobs register models.
+      - MLFLOW_BACKEND_STORE_URI=postgresql://itb:itb@postgres:5432/mlflow
       - MLFLOW_ARTIFACT_ROOT=/mlruns
+      - MLFLOW_PGHOST=postgres
+      - MLFLOW_PGUSER=itb
+      - MLFLOW_PGPASSWORD=itb
+      - MLFLOW_PGDATABASE=mlflow
     volumes:
       - mlflow_artifacts:/mlruns
-    command: >
-      mlflow server
-      --backend-store-uri sqlite:////mlruns/mlflow.db
-      --default-artifact-root /mlruns
-      --host 0.0.0.0 --port 5000
-      --allowed-hosts '*'
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   web:
     build:

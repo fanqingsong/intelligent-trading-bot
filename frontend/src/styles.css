@@ -508,11 +508,114 @@ table.data th {
 
 /* ----- Signals gauge dashboard ----- */
 
+.signal-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  margin-bottom: 1.25rem;
+}
+
+.signal-section {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1rem 0.75rem;
+  background: rgba(18, 24, 32, 0.55);
+}
+
+.signal-section-buy {
+  border-color: rgba(61, 154, 122, 0.45);
+}
+
+.signal-section-sell {
+  border-color: rgba(200, 80, 80, 0.4);
+}
+
+.signal-section-hold {
+  border-color: rgba(120, 130, 145, 0.35);
+}
+
+.signal-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.signal-section.is-collapsed .signal-section-head {
+  margin-bottom: 0;
+}
+
+.signal-section-head.is-toggle {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 8px;
+  margin: -0.25rem;
+  padding: 0.25rem;
+  outline: none;
+}
+
+.signal-section-head.is-toggle:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.signal-section-head.is-toggle:focus-visible {
+  box-shadow: 0 0 0 1px rgba(140, 160, 180, 0.45);
+}
+
+.signal-section-chevron {
+  display: inline-block;
+  width: 0.9rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  transition: transform 0.15s ease;
+}
+
+.signal-section-chevron.open {
+  transform: rotate(90deg);
+}
+
+.signal-section-toggle-hint {
+  opacity: 0.75;
+}
+
+.signal-section-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.signal-section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.5rem;
+  height: 1.5rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: #1a222c;
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+  font-family: var(--mono);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.signal-section-empty {
+  margin: 0 0 0.5rem;
+  padding: 0.75rem 0.25rem;
+  font-size: 0.85rem;
+}
+
 .gauge-board {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 1rem;
-  margin-bottom: 1.25rem;
+  margin-bottom: 0.5rem;
 }
 
 .gauge-card {

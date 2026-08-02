@@ -35,7 +35,7 @@ export default function WatchlistPage() {
 
   const load = useCallback(async () => {
     try {
-      const wl = await api.watchlist();
+      const wl = await api.watchlist({ includeSignals: false });
       setItems(wl.items || []);
       setError("");
     } catch (e: any) {

@@ -20,7 +20,7 @@ from shared import (
     symbol_config_overrides,
 )
 from shared.db.engine import get_session_factory
-from shared.db.frames import load_frame
+from shared.db.frames import frame_exists, load_frame_tail
 from backend.db.models import BatchRun, SymbolRunLink, WatchlistItem
 
 PIPELINE_URL = os.environ.get("PIPELINE_URL", "http://localhost:8001")
@@ -521,9 +521,8 @@ async def _process_train_batch(batch_id: int, *, team: str | None = None) -> Non
 def _is_trained(item: WatchlistItem) -> bool:
     if item.train_status in ("ready", "completed"):
         return True
-    # Heuristic: has signals or predictions in DB
-    df = load_frame(item.symbol, "signals")
-    return not df.empty
+    # Heuristic: has signals in DB
+    return frame_exists(item.symbol, "signals")
 
 
 async def predict_symbols(
@@ -645,7 +644,8 @@ def _algo_recommendation(row: pd.Series, algo: str) -> str:
 
 
 def symbol_signals(symbol: str) -> dict[str, Any]:
-    df = load_frame(symbol, "signals")
+    # Board only needs the latest row — avoid loading the full signals history.
+    df = load_frame_tail(symbol, "signals", n=1)
     summary: dict[str, Any] = {
         "symbol": symbol,
         "available": False,
@@ -693,7 +693,6 @@ def symbol_signals(symbol: str) -> dict[str, Any]:
         "vote": vote,
         "recommendation": vote,
         "close": float(row["close"]) if "close" in df.columns and pd.notna(row.get("close")) else None,
-        "total_rows": len(df),
         "timestamp": latest.get("timestamp"),
     })
     return summary
@@ -808,6 +807,16 @@ def _job_progress_payload(kind: str, job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _fetch_job(client: httpx.AsyncClient, job_id: str) -> dict[str, Any] | None:
+    try:
+        resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{job_id}")
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        return None
+    return None
+
+
 async def refresh_running_statuses() -> None:
     """Poll Redis/pipeline for in-flight watchlist jobs and sync DB status."""
     SessionLocal = get_session_factory()
@@ -830,34 +839,21 @@ async def refresh_running_statuses() -> None:
             kind = batch.kind if batch and batch.kind in ("train", "predict") else "predict"
             link_snapshot.append((link.symbol, link.job_id, kind))
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for symbol, train_status, train_job, predict_status, predict_job in snapshot:
-            if train_status in ("running", "queued") and train_job:
-                try:
-                    resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{train_job}")
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        sync_job_status(symbol, train_job, "train", data.get("status", ""), data.get("error", ""))
-                except Exception:
-                    pass
-            if predict_status in ("running", "queued") and predict_job:
-                try:
-                    resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{predict_job}")
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        sync_job_status(
-                            symbol, predict_job, "predict", data.get("status", ""), data.get("error", "")
-                        )
-                except Exception:
-                    pass
-        for symbol, job_id, kind in link_snapshot:
-            try:
-                resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{job_id}")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    sync_job_status(symbol, job_id, kind, data.get("status", ""), data.get("error", ""))
-            except Exception:
-                pass
+    pending: list[tuple[str, str, str]] = []  # (symbol, job_id, kind)
+    for symbol, train_status, train_job, predict_status, predict_job in snapshot:
+        if train_status in ("running", "queued") and train_job:
+            pending.append((symbol, train_job, "train"))
+        if predict_status in ("running", "queued") and predict_job:
+            pending.append((symbol, predict_job, "predict"))
+    pending.extend(link_snapshot)
+
+    if pending:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            results = await asyncio.gather(*[_fetch_job(client, job_id) for _, job_id, _ in pending])
+        for (symbol, job_id, kind), data in zip(pending, results):
+            if not data:
+                continue
+            sync_job_status(symbol, job_id, kind, data.get("status", ""), data.get("error", ""))
 
     # Keep durable train-all processors alive across task death / process restart.
     try:
@@ -880,24 +876,21 @@ async def enrich_items_with_job_progress(items: list[dict[str, Any]]) -> list[di
 
     out = [dict(item) for item in items]
     async with httpx.AsyncClient(timeout=10.0) as client:
-        for idx, kind, job_id in need:
-            try:
-                resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{job_id}")
-                if resp.status_code != 200:
-                    continue
-                payload = _job_progress_payload(kind, resp.json())
-                if kind == "train":
-                    out[idx]["train_job"] = payload
-                    # Convenience alias for the active train UI.
-                    if out[idx].get("train_status") in ("running", "queued"):
-                        out[idx]["job_progress"] = payload
-                else:
-                    out[idx]["predict_job"] = payload
-                    if (
-                        out[idx].get("predict_status") in ("running", "queued")
-                        and out[idx].get("train_status") not in ("running", "queued")
-                    ):
-                        out[idx]["job_progress"] = payload
-            except Exception:
-                continue
+        results = await asyncio.gather(*[_fetch_job(client, job_id) for _, _, job_id in need])
+    for (idx, kind, _), data in zip(need, results):
+        if not data:
+            continue
+        payload = _job_progress_payload(kind, data)
+        if kind == "train":
+            out[idx]["train_job"] = payload
+            # Convenience alias for the active train UI.
+            if out[idx].get("train_status") in ("running", "queued"):
+                out[idx]["job_progress"] = payload
+        else:
+            out[idx]["predict_job"] = payload
+            if (
+                out[idx].get("predict_status") in ("running", "queued")
+                and out[idx].get("train_status") not in ("running", "queued")
+            ):
+                out[idx]["job_progress"] = payload
     return out

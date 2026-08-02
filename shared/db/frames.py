@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from shared.db.engine import get_session_factory
@@ -112,6 +112,23 @@ def _df_to_records(
     return records
 
 
+def _rows_to_frame(rows: list[MarketFrame], time_column: str) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        payload = dict(row.payload or {})
+        payload[time_column] = row.ts
+        records.append(payload)
+    df = pd.DataFrame.from_records(records)
+    if time_column in df.columns:
+        df[time_column] = pd.to_datetime(df[time_column], utc=True, errors="coerce")
+        # Pipeline / merge historically use tz-naive timestamps.
+        df[time_column] = df[time_column].dt.tz_convert(None)
+        df = df.sort_values(by=time_column).reset_index(drop=True)
+    return df
+
+
 def load_frame(symbol: str, kind: str, time_column: str = "timestamp") -> pd.DataFrame:
     kind = normalize_kind(kind)
     SessionLocal = get_session_factory()
@@ -121,23 +138,56 @@ def load_frame(symbol: str, kind: str, time_column: str = "timestamp") -> pd.Dat
             .where(MarketFrame.symbol == symbol, MarketFrame.kind == kind)
             .order_by(MarketFrame.ts.asc())
         ).all()
+    return _rows_to_frame(list(rows), time_column)
 
-    if not rows:
-        return pd.DataFrame()
 
-    records: list[dict[str, Any]] = []
-    for row in rows:
-        payload = dict(row.payload or {})
-        payload[time_column] = row.ts
-        records.append(payload)
+def load_frame_tail(
+    symbol: str,
+    kind: str,
+    n: int = 1,
+    time_column: str = "timestamp",
+) -> pd.DataFrame:
+    """Load only the last ``n`` rows for a symbol/kind (cheaper than full ``load_frame``)."""
+    kind = normalize_kind(kind)
+    limit = max(1, int(n))
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(MarketFrame)
+            .where(MarketFrame.symbol == symbol, MarketFrame.kind == kind)
+            .order_by(MarketFrame.ts.desc())
+            .limit(limit)
+        ).all()
+    # Query is newest-first; reverse to chronological for callers.
+    return _rows_to_frame(list(reversed(rows)), time_column)
 
-    df = pd.DataFrame.from_records(records)
-    if time_column in df.columns:
-        df[time_column] = pd.to_datetime(df[time_column], utc=True, errors="coerce")
-        # Pipeline / merge historically use tz-naive timestamps.
-        df[time_column] = df[time_column].dt.tz_convert(None)
-        df = df.sort_values(by=time_column).reset_index(drop=True)
-    return df
+
+def frame_row_count(symbol: str, kind: str) -> int:
+    kind = normalize_kind(kind)
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        return int(
+            session.scalar(
+                select(func.count())
+                .select_from(MarketFrame)
+                .where(MarketFrame.symbol == symbol, MarketFrame.kind == kind)
+            )
+            or 0
+        )
+
+
+def frame_exists(symbol: str, kind: str) -> bool:
+    kind = normalize_kind(kind)
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        return (
+            session.scalar(
+                select(MarketFrame.id)
+                .where(MarketFrame.symbol == symbol, MarketFrame.kind == kind)
+                .limit(1)
+            )
+            is not None
+        )
 
 
 def save_frame(

@@ -20,13 +20,16 @@ type Props = {
 
 function toDayTime(raw: unknown): Time | null {
   if (raw == null) return null;
-  const d = new Date(String(raw));
+  const s = String(raw);
+  // Prefer calendar date from the string to avoid UTC/local day shift (A-share daily bars)
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (m) return m[1] as Time;
+  const d = new Date(s);
   if (Number.isNaN(d.getTime())) return null;
-  // Daily bars: use UTC calendar day string for stable alignment
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}` as Time;
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${day}` as Time;
 }
 
 function num(v: unknown): number | null {
@@ -111,6 +114,7 @@ export default function SignalChart({ rows, height = 380 }: Props) {
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
 
+  // Always mount the canvas so chart init is not skipped when rows load later
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -168,11 +172,7 @@ export default function SignalChart({ rows, height = 380 }: Props) {
     seriesRef.current.setData(candles);
     markersRef.current.setMarkers(markers);
     chartRef.current.timeScale().fitContent();
-  }, [rows]);
-
-  if (!rows.length) {
-    return <p className="muted">暂无可用的 OHLC / 信号数据绘制 K 线</p>;
-  }
+  }, [rows, height]);
 
   return (
     <div className="signal-chart">
@@ -181,7 +181,10 @@ export default function SignalChart({ rows, height = 380 }: Props) {
         <span className="rec sell">▼ SELL</span>
         <span className="muted">多数投票买卖点</span>
       </div>
-      <div ref={containerRef} className="signal-chart-canvas" />
+      {!rows.length && (
+        <p className="muted">暂无可用的 OHLC / 信号数据绘制 K 线</p>
+      )}
+      <div ref={containerRef} className="signal-chart-canvas" style={{ height }} />
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { api } from "../api";
 import Gauge from "../components/Gauge";
 import SignalChart from "../components/SignalChart";
@@ -35,17 +35,41 @@ function voteFallbackScore(vote?: string): number {
   return 0;
 }
 
+const VOTE_SECTIONS = [
+  { key: "BUY", title: "买入 BUY", hint: "多数投票为买入" },
+  { key: "SELL", title: "卖出 SELL", hint: "多数投票为卖出" },
+  { key: "HOLD", title: "持有 HOLD", hint: "无明确买卖信号" },
+] as const;
+
+function normalizeVote(vote?: string): "BUY" | "SELL" | "HOLD" {
+  if (vote === "BUY" || vote === "SELL") return vote;
+  return "HOLD";
+}
+
 export default function SignalsPage() {
   const [items, setItems] = useState<WatchItem[]>([]);
   const [data, setData] = useState<any>(null);
   const [symbol, setSymbol] = useState("");
   const [error, setError] = useState("");
   const [showTable, setShowTable] = useState(false);
+  const [holdExpanded, setHoldExpanded] = useState(false);
 
   const selected = useMemo(
     () => items.find((it) => it.symbol === symbol) || null,
     [items, symbol],
   );
+
+  const grouped = useMemo(() => {
+    const buckets: Record<"BUY" | "SELL" | "HOLD", WatchItem[]> = {
+      BUY: [],
+      SELL: [],
+      HOLD: [],
+    };
+    for (const it of items) {
+      buckets[normalizeVote(it.vote)].push(it);
+    }
+    return buckets;
+  }, [items]);
 
   const loadBoard = useCallback(async () => {
     try {
@@ -97,7 +121,9 @@ export default function SignalsPage() {
   return (
     <div>
       <h1 className="page-title">Signals</h1>
-      <p className="page-sub">仪表盘看板 · 四算法 + 多数投票 · 点击卡片查看详情与历史买卖点</p>
+      <p className="page-sub">
+        按 BUY / SELL / HOLD 分组 · 四算法 + 多数投票 · 点击卡片查看详情与历史买卖点
+      </p>
       {error && <p className="error">{error}</p>}
 
       {items.length === 0 ? (
@@ -105,54 +131,112 @@ export default function SignalsPage() {
           <p className="muted">暂无关注股票，请先到 Watchlist 添加</p>
         </div>
       ) : (
-        <div className="gauge-board">
-          {items.map((it) => {
-            const score = avgScore(it.algorithms);
-            const gaugeValue = score ?? voteFallbackScore(it.vote);
-            const active = symbol === it.symbol;
+        <div className="signal-sections">
+          {VOTE_SECTIONS.map((sec) => {
+            const list = grouped[sec.key];
+            const isHold = sec.key === "HOLD";
+            const collapsed = isHold && !holdExpanded;
             return (
-              <button
-                key={it.symbol}
-                type="button"
-                className={`gauge-card${active ? " active" : ""}`}
-                onClick={() => openDetail(it.symbol)}
+              <section
+                key={sec.key}
+                className={`signal-section signal-section-${sec.key.toLowerCase()}${collapsed ? " is-collapsed" : ""}`}
               >
-                <div className="gauge-card-head">
-                  <div>
-                    <strong className="gauge-card-symbol">{it.symbol}</strong>
-                    <div className="muted gauge-card-name">{it.name || it.exchange}</div>
-                  </div>
-                  <span className={recClass(it.vote)}>{it.vote || "—"}</span>
-                </div>
-
-                <Gauge
-                  value={score ?? gaugeValue}
-                  recommendation={it.vote || "HOLD"}
-                  size={180}
-                />
-
-                <div className="algo-pills">
-                  {ALGOS.map((a) => {
-                    const rec = it.algorithms?.[a]?.recommendation || "HOLD";
-                    const sc = it.algorithms?.[a]?.trade_score;
-                    return (
-                      <span key={a} className={`algo-pill ${recClass(rec)}`} title={sc != null ? String(sc) : ""}>
-                        {a.toUpperCase()}
-                        <em>{rec}</em>
+                <div
+                  className={`signal-section-head${isHold ? " is-toggle" : ""}`}
+                  {...(isHold
+                    ? {
+                        role: "button" as const,
+                        tabIndex: 0,
+                        "aria-expanded": holdExpanded,
+                        onClick: () => setHoldExpanded((v) => !v),
+                        onKeyDown: (e: KeyboardEvent) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setHoldExpanded((v) => !v);
+                          }
+                        },
+                      }
+                    : {})}
+                >
+                  <h2>
+                    {isHold && (
+                      <span className={`signal-section-chevron${holdExpanded ? " open" : ""}`} aria-hidden>
+                        ▸
                       </span>
-                    );
-                  })}
+                    )}
+                    <span className={recClass(sec.key)}>{sec.title}</span>
+                    <span className="signal-section-count">{list.length}</span>
+                  </h2>
+                  <p className="muted">
+                    {sec.hint}
+                    {isHold && (
+                      <span className="signal-section-toggle-hint">
+                        {holdExpanded ? " · 点击收起" : " · 点击展开"}
+                      </span>
+                    )}
+                  </p>
                 </div>
+                {!collapsed &&
+                  (list.length === 0 ? (
+                    <p className="muted signal-section-empty">暂无该状态股票</p>
+                  ) : (
+                    <div className="gauge-board">
+                      {list.map((it) => {
+                        const score = avgScore(it.algorithms);
+                        const gaugeValue = score ?? voteFallbackScore(it.vote);
+                        const active = symbol === it.symbol;
+                        return (
+                          <button
+                            key={it.symbol}
+                            type="button"
+                            className={`gauge-card${active ? " active" : ""}`}
+                            onClick={() => openDetail(it.symbol)}
+                          >
+                            <div className="gauge-card-head">
+                              <div>
+                                <strong className="gauge-card-symbol">{it.symbol}</strong>
+                                <div className="muted gauge-card-name">{it.name || it.exchange}</div>
+                              </div>
+                              <span className={recClass(it.vote)}>{it.vote || "—"}</span>
+                            </div>
 
-                <div className="gauge-card-meta">
-                  <span>{it.close != null ? Number(it.close).toFixed(2) : "—"}</span>
-                  <span className="muted">
-                    {it.signal_timestamp
-                      ? new Date(it.signal_timestamp).toLocaleString()
-                      : "无信号"}
-                  </span>
-                </div>
-              </button>
+                            <Gauge
+                              value={score ?? gaugeValue}
+                              recommendation={it.vote || "HOLD"}
+                              size={180}
+                            />
+
+                            <div className="algo-pills">
+                              {ALGOS.map((a) => {
+                                const rec = it.algorithms?.[a]?.recommendation || "HOLD";
+                                const sc = it.algorithms?.[a]?.trade_score;
+                                return (
+                                  <span
+                                    key={a}
+                                    className={`algo-pill ${recClass(rec)}`}
+                                    title={sc != null ? String(sc) : ""}
+                                  >
+                                    {a.toUpperCase()}
+                                    <em>{rec}</em>
+                                  </span>
+                                );
+                              })}
+                            </div>
+
+                            <div className="gauge-card-meta">
+                              <span>{it.close != null ? Number(it.close).toFixed(2) : "—"}</span>
+                              <span className="muted">
+                                {it.signal_timestamp
+                                  ? new Date(it.signal_timestamp).toLocaleString()
+                                  : "无信号"}
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+              </section>
             );
           })}
         </div>

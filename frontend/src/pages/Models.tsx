@@ -67,7 +67,7 @@ export default function ModelsPage() {
   const loadWatchlist = useCallback(async () => {
     try {
       const [wl, sch, active] = await Promise.all([
-        api.watchlist(),
+        api.watchlist({ includeSignals: false }),
         api.getSchedule(),
         api.watchlistTrainActive().catch(() => ({ batch: null })),
       ]);
@@ -113,7 +113,7 @@ export default function ModelsPage() {
     const ms = hasInflightJobs ? 2000 : 5000;
     const t = window.setInterval(() => {
       api
-        .watchlist()
+        .watchlist({ includeSignals: false })
         .then((wl) => setItems(wl.items || []))
         .catch(() => {});
       api.getSchedule().then(setSchedule).catch(() => {});

@@ -1,4 +1,5 @@
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
@@ -11,28 +12,44 @@ function authHeaders(): Record<string, string> {
   return headers;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders(),
-      ...(init?.headers || {}),
-    },
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    let message = text || res.statusText;
-    try {
-      const body = JSON.parse(text);
-      if (typeof body?.detail === "string") message = body.detail;
-      else if (body?.detail != null) message = JSON.stringify(body.detail);
-    } catch {
-      /* keep raw text */
+type RequestOptions = RequestInit & { timeoutMs?: number };
+
+async function request<T>(path: string, init?: RequestOptions): Promise<T> {
+  const timeoutMs = init?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const { timeoutMs: _timeoutMs, signal, ...rest } = init || {};
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      ...rest,
+      signal: signal ?? controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders(),
+        ...(rest.headers || {}),
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      let message = text || res.statusText;
+      try {
+        const body = JSON.parse(text);
+        if (typeof body?.detail === "string") message = body.detail;
+        else if (body?.detail != null) message = JSON.stringify(body.detail);
+      } catch {
+        /* keep raw text */
+      }
+      throw new Error(message);
     }
-    throw new Error(message);
+    return res.json() as Promise<T>;
+  } catch (e: unknown) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}s）：${path}`);
+    }
+    throw e;
+  } finally {
+    window.clearTimeout(timer);
   }
-  return res.json() as Promise<T>;
 }
 
 export type JobRef = {
@@ -58,7 +75,10 @@ export const api = {
   getConfig: () => request<{ path: string; content: string; parsed: any }>("/api/config"),
   putConfig: (content: string) =>
     request("/api/config", { method: "PUT", body: JSON.stringify({ content }) }),
-  watchlist: () => request<{ items: any[] }>("/api/watchlist"),
+  watchlist: (opts?: { includeSignals?: boolean }) => {
+    const q = opts?.includeSignals === false ? "?include_signals=false" : "";
+    return request<{ items: any[] }>(`/api/watchlist${q}`);
+  },
   watchlistSuggest: (q: string, limit = 15) =>
     request<{ query: string; items: { code: string; name: string; exchange: string; label: string }[] }>(
       `/api/watchlist/suggest?q=${encodeURIComponent(q)}&limit=${limit}`,

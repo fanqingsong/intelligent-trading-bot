@@ -2,19 +2,23 @@ FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.12-slim
 
 WORKDIR /mlruns
 
-# Debian apt mirror (Aliyun) + build deps
+# Debian apt mirror (Aliyun) + build deps / psql client
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
     && sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
 
-# MLflow tracking server only (no full ML stack needed here)
-RUN pip install --no-cache-dir "mlflow>=2.14,<4"
+# MLflow tracking server + Postgres driver (no full ML stack needed here)
+RUN pip install --no-cache-dir "mlflow>=2.14,<4" "psycopg2-binary>=2.9"
+
+COPY docker/mlflow-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 5000
 
-CMD ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000"]
+ENTRYPOINT ["/entrypoint.sh"]

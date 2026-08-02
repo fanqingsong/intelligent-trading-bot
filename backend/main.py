@@ -30,7 +30,12 @@ from shared import (
     write_config_text,
 )
 from backend.db import ensure_control_plane_db
-from shared.db.frames import FRAME_KINDS, list_kinds_for_symbol, load_frame
+from shared.db.frames import (
+    FRAME_KINDS,
+    frame_row_count,
+    list_kinds_for_symbol,
+    load_frame_tail,
+)
 
 app = FastAPI(title="ITB API", version="0.2.0")
 
@@ -214,7 +219,12 @@ def watchlist_suggest(
 
 
 @app.get("/api/watchlist")
-async def watchlist_list():
+async def watchlist_list(
+    include_signals: bool = Query(
+        True,
+        description="Attach latest signal summary (Signals board). Models can set false.",
+    ),
+):
     from backend.watchlist_service import (
         enrich_items_with_job_progress,
         list_items,
@@ -223,11 +233,16 @@ async def watchlist_list():
     )
 
     await refresh_running_statuses()
-    items = await enrich_items_with_job_progress(list_items())
-    # Attach latest signal summary (lightweight)
+    items = await enrich_items_with_job_progress(await asyncio.to_thread(list_items))
+    if not include_signals:
+        return {"items": items}
+
+    # DB reads are sync; run off the event loop and in parallel per symbol.
+    sigs = await asyncio.gather(
+        *[asyncio.to_thread(symbol_signals, item["symbol"]) for item in items]
+    )
     enriched = []
-    for item in items:
-        sig = symbol_signals(item["symbol"])
+    for item, sig in zip(items, sigs):
         enriched.append({
             **item,
             "vote": sig.get("vote"),
@@ -651,14 +666,14 @@ def preview_data(
     config = load_config_dict()
     sym = symbol or config.get("symbol", "600519")
     try:
-        df = load_frame(sym, file)
+        df = load_frame_tail(sym, file, n=rows)
+        total = frame_row_count(sym, file)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     if df.empty:
         return {"columns": [], "rows": [], "total_rows": 0, "symbol": sym, "kind": file}
-    tail = df.tail(rows)
-    records = json.loads(tail.to_json(orient="records", date_format="iso"))
-    return {"columns": list(df.columns), "rows": records, "total_rows": len(df), "symbol": sym, "kind": file}
+    records = json.loads(df.to_json(orient="records", date_format="iso"))
+    return {"columns": list(df.columns), "rows": records, "total_rows": total, "symbol": sym, "kind": file}
 
 
 @app.get("/api/signals/recent")
@@ -668,15 +683,14 @@ def recent_signals(
 ):
     config = load_config_dict()
     sym = symbol or config.get("symbol", "600519")
-    df = load_frame(sym, "signals")
+    df = load_frame_tail(sym, "signals", n=rows)
     if df.empty:
         return {"columns": [], "rows": [], "total_rows": 0, "symbol": sym, "source": "postgres"}
-    tail = df.tail(rows)
-    records = json.loads(tail.to_json(orient="records", date_format="iso"))
+    records = json.loads(df.to_json(orient="records", date_format="iso"))
     return {
         "columns": list(df.columns),
         "rows": records,
-        "total_rows": len(df),
+        "total_rows": frame_row_count(sym, "signals"),
         "symbol": sym,
         "source": "postgres",
     }
