@@ -50,6 +50,7 @@ dependencies = [
     # MLflow 3 LoggedModels power the experiment Models tab; keep client≈server.
     # kedro-mlflow is unused (hooks disabled in settings.py) and 0.14 pins mlflow<3.
     "mlflow>=3.1,<4",
+    "prefect==3.6.4",
 
     # Persistence
     "sqlalchemy==2.*",

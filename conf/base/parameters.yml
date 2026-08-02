@@ -37,6 +37,11 @@ features_horizon: 10
 predict_length: 60
 append_overlap_records: 5
 
+# Parallel label×algo training (overridden by jsonc)
+train_parallel:
+  use_multiprocessing: false
+  max_workers: 4
+
 # ---- Signals / trading / simulation (overridden by jsonc) ----
 signal_sets: []
 output_sets: []

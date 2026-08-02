@@ -4,18 +4,22 @@ from __future__ import annotations
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
+from sqlalchemy import delete, func, select
 
 # Leading digit → exchange (for validation / messaging only; akshare takes 6-digit codes)
 _SH_PREFIXES = ("6", "9")
 _SZ_PREFIXES = ("0", "3")
 
 _STOCK_LIST_LOCK = threading.Lock()
+_REFRESH_LOCK = threading.Lock()
 _STOCK_LIST_DF: pd.DataFrame | None = None
 _STOCK_LIST_LOADED_AT: float = 0.0
 _STOCK_LIST_TTL_SEC = 24 * 3600
+_REFRESH_THREAD: threading.Thread | None = None
+_CACHE_COLUMNS = ("code", "name", "name_key", "exchange")
 
 
 def _clean_stock_name(name: str) -> str:
@@ -62,9 +66,154 @@ def ashare_exchange(code: str) -> str:
     return "SH" if code[0] in _SH_PREFIXES else "SZ"
 
 
+def _normalize_stock_list(raw: pd.DataFrame) -> pd.DataFrame:
+    df = raw.rename(columns={c: str(c).lower() for c in raw.columns}).copy()
+    if "code" not in df.columns or "name" not in df.columns:
+        raise RuntimeError(f"Unexpected stock list columns: {list(raw.columns)}")
+
+    df["code"] = df["code"].astype(str).str.zfill(6)
+    df = df[df["code"].str[0].isin(_SH_PREFIXES + _SZ_PREFIXES)].copy()
+    df["name"] = df["name"].astype(str)
+    if "name_key" not in df.columns:
+        df["name_key"] = df["name"].map(_clean_stock_name)
+    else:
+        df["name_key"] = df["name_key"].astype(str)
+    if "exchange" not in df.columns:
+        df["exchange"] = df["code"].map(lambda c: "SH" if c[0] in _SH_PREFIXES else "SZ")
+    else:
+        df["exchange"] = df["exchange"].astype(str)
+    return (
+        df.loc[:, list(_CACHE_COLUMNS)]
+        .drop_duplicates(subset=["code"], keep="first")
+        .reset_index(drop=True)
+    )
+
+
+def _dt_to_epoch(value: datetime | None) -> float:
+    if value is None:
+        return 0.0
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
+
+
+def _read_db_cache() -> tuple[pd.DataFrame | None, float]:
+    """Load ashare_stocks from Postgres. Returns (df, refreshed_at_epoch)."""
+    try:
+        from shared.db.engine import get_session_factory
+        from shared.db.models import AshareStock
+
+        SessionLocal = get_session_factory()
+        with SessionLocal() as session:
+            refreshed_at = session.execute(select(func.max(AshareStock.updated_at))).scalar_one_or_none()
+            if refreshed_at is None:
+                return None, 0.0
+            rows = session.execute(
+                select(
+                    AshareStock.code,
+                    AshareStock.name,
+                    AshareStock.name_key,
+                    AshareStock.exchange,
+                ).order_by(AshareStock.code)
+            ).all()
+        if not rows:
+            return None, 0.0
+        df = pd.DataFrame(rows, columns=list(_CACHE_COLUMNS))
+        return df, _dt_to_epoch(refreshed_at)
+    except Exception as e:
+        print(f"WARN: failed to read ashare_stocks from db: {e}")
+        return None, 0.0
+
+
+def _write_db_cache(df: pd.DataFrame) -> None:
+    """Replace ashare_stocks contents atomically."""
+    try:
+        from shared.db.engine import get_session_factory
+        from shared.db.models import AshareStock
+
+        now = datetime.now(timezone.utc)
+        payload = [
+            {
+                "code": str(row.code),
+                "name": str(row.name),
+                "name_key": str(row.name_key),
+                "exchange": str(row.exchange),
+                "updated_at": now,
+            }
+            for row in df.loc[:, list(_CACHE_COLUMNS)].itertuples(index=False)
+        ]
+        SessionLocal = get_session_factory()
+        with SessionLocal() as session:
+            session.execute(delete(AshareStock))
+            if payload:
+                session.execute(AshareStock.__table__.insert(), payload)
+            session.commit()
+    except Exception as e:
+        print(f"WARN: failed to write ashare_stocks to db: {e}")
+
+
+def _fetch_stock_list_from_akshare() -> pd.DataFrame:
+    import akshare as ak
+
+    raw = ak.stock_info_a_code_name()
+    if raw is None or raw.empty:
+        raise RuntimeError("Failed to load A-share stock list")
+    return _normalize_stock_list(raw)
+
+
+def _set_memory_cache(df: pd.DataFrame, loaded_at: float) -> pd.DataFrame:
+    global _STOCK_LIST_DF, _STOCK_LIST_LOADED_AT
+    with _STOCK_LIST_LOCK:
+        _STOCK_LIST_DF = df
+        _STOCK_LIST_LOADED_AT = loaded_at
+        return _STOCK_LIST_DF
+
+
+def _refresh_stock_list(*, force: bool = False) -> pd.DataFrame:
+    """Fetch from akshare outside the memory lock, then update memory + db."""
+    with _REFRESH_LOCK:
+        if not force:
+            now = time.time()
+            with _STOCK_LIST_LOCK:
+                if (
+                    _STOCK_LIST_DF is not None
+                    and (now - _STOCK_LIST_LOADED_AT) < _STOCK_LIST_TTL_SEC
+                ):
+                    return _STOCK_LIST_DF
+
+        df = _fetch_stock_list_from_akshare()
+        _write_db_cache(df)
+        return _set_memory_cache(df, time.time())
+
+
+def _refresh_stock_list_safe() -> None:
+    try:
+        _refresh_stock_list()
+    except Exception as e:
+        print(f"WARN: ashare stock list refresh failed: {e}")
+
+
+def _schedule_stock_list_refresh() -> None:
+    """Kick a background refresh without blocking on the network lock."""
+    global _REFRESH_THREAD
+    with _STOCK_LIST_LOCK:
+        if _REFRESH_THREAD is not None and _REFRESH_THREAD.is_alive():
+            return
+        _REFRESH_THREAD = threading.Thread(
+            target=_refresh_stock_list_safe,
+            name="ashare-stock-list-refresh",
+            daemon=True,
+        )
+        _REFRESH_THREAD.start()
+
+
 def get_ashare_stock_list(force_refresh: bool = False) -> pd.DataFrame:
     """
-    Cached A-share code/name table from akshare (沪深，过滤北交所等).
+    Cached A-share code/name table (沪深，过滤北交所等).
+
+    Memory (TTL 24h) → Postgres ``ashare_stocks`` → akshare.
+    Network fetch runs outside the memory lock; stale cache is served while a
+    background refresh runs when TTL expires.
     Columns: code, name, name_key, exchange
     """
     global _STOCK_LIST_DF, _STOCK_LIST_LOADED_AT
@@ -77,27 +226,41 @@ def get_ashare_stock_list(force_refresh: bool = False) -> pd.DataFrame:
             and (now - _STOCK_LIST_LOADED_AT) < _STOCK_LIST_TTL_SEC
         ):
             return _STOCK_LIST_DF
+        memory_df = _STOCK_LIST_DF
 
-        import akshare as ak
+    if force_refresh:
+        return _refresh_stock_list(force=True)
 
-        raw = ak.stock_info_a_code_name()
-        if raw is None or raw.empty:
-            raise RuntimeError("Failed to load A-share stock list")
+    if memory_df is None:
+        db_df, db_at = _read_db_cache()
+        if db_df is not None:
+            with _STOCK_LIST_LOCK:
+                if (
+                    _STOCK_LIST_DF is not None
+                    and (time.time() - _STOCK_LIST_LOADED_AT) < _STOCK_LIST_TTL_SEC
+                ):
+                    return _STOCK_LIST_DF
+                _STOCK_LIST_DF = db_df
+                _STOCK_LIST_LOADED_AT = db_at
+                memory_df = _STOCK_LIST_DF
+            if (now - db_at) < _STOCK_LIST_TTL_SEC:
+                return memory_df
 
-        df = raw.rename(columns={c: str(c).lower() for c in raw.columns}).copy()
-        if "code" not in df.columns or "name" not in df.columns:
-            raise RuntimeError(f"Unexpected stock list columns: {list(raw.columns)}")
+    if memory_df is not None:
+        # Stale-while-revalidate: keep suggest snappy while refreshing.
+        _schedule_stock_list_refresh()
+        return memory_df
 
-        df["code"] = df["code"].astype(str).str.zfill(6)
-        df = df[df["code"].str[0].isin(_SH_PREFIXES + _SZ_PREFIXES)].copy()
-        df["name"] = df["name"].astype(str)
-        df["name_key"] = df["name"].map(_clean_stock_name)
-        df["exchange"] = df["code"].map(lambda c: "SH" if c[0] in _SH_PREFIXES else "SZ")
-        df = df.drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    return _refresh_stock_list()
 
-        _STOCK_LIST_DF = df
-        _STOCK_LIST_LOADED_AT = now
-        return df
+
+def warmup_ashare_stock_list() -> None:
+    """Prefetch stock list into memory (and db) so Watchlist suggest is warm."""
+    try:
+        df = get_ashare_stock_list()
+        print(f"INFO: ashare stock list ready ({len(df)} symbols)")
+    except Exception as e:
+        print(f"WARN: ashare stock list warmup failed: {e}")
 
 
 def search_ashare_stocks(query: str, limit: int = 15) -> list[dict]:
@@ -179,6 +342,76 @@ def resolve_ashare_query(raw: str) -> str:
         raise ValueError(f"未找到股票：{text}（请输入代码如 600519，或名称如 贵州茅台）")
     opts = "；".join(h["label"] for h in hits[:5])
     raise ValueError(f"匹配到多只股票，请从提示中选择：{opts}")
+
+
+# Index constituent presets (China Securities Index / 中证指数)
+INDEX_PRESETS: dict[str, dict[str, str]] = {
+    "sse50": {"code": "000016", "name": "上证50"},
+    "csi300": {"code": "000300", "name": "沪深300"},
+    "000016": {"code": "000016", "name": "上证50"},
+    "000300": {"code": "000300", "name": "沪深300"},
+}
+
+
+def resolve_index_preset(index: str) -> dict[str, str]:
+    """Resolve preset key or index code to {code, name}."""
+    key = (index or "").strip().lower()
+    if not key:
+        raise ValueError("请指定指数，如 sse50 / csi300")
+    preset = INDEX_PRESETS.get(key)
+    if not preset:
+        raise ValueError(f"不支持的指数：{index}（可选：sse50 / csi300）")
+    return dict(preset)
+
+
+def fetch_index_constituents(index: str) -> list[dict]:
+    """
+    Fetch A-share constituents for an index via akshare (中证指数成分股).
+
+    Returns list of {code, name, exchange}.
+    """
+    import akshare as ak
+
+    preset = resolve_index_preset(index)
+    index_code = preset["code"]
+
+    def _call():
+        return ak.index_stock_cons_csindex(symbol=index_code)
+
+    raw = _with_retries(f"index_cons:{index_code}", _call)
+    if raw is None or raw.empty:
+        raise RuntimeError(f"指数 {preset['name']}({index_code}) 成分股为空")
+
+    code_col = next(
+        (c for c in ("成分券代码", "品种代码", "code", "证券代码") if c in raw.columns),
+        None,
+    )
+    name_col = next(
+        (c for c in ("成分券名称", "品种名称", "name", "证券名称") if c in raw.columns),
+        None,
+    )
+    if not code_col:
+        raise RuntimeError(f"Unexpected index constituent columns: {list(raw.columns)}")
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for _, row in raw.iterrows():
+        try:
+            code = normalize_ashare_symbol(row[code_col])
+        except ValueError:
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        name = _clean_stock_name(row[name_col]) if name_col else ""
+        out.append({
+            "code": code,
+            "name": name,
+            "exchange": ashare_exchange(code),
+        })
+    if not out:
+        raise RuntimeError(f"指数 {preset['name']}({index_code}) 无有效 A 股成分")
+    return out
 
 
 def _prefixed_symbol(symbol: str) -> str:

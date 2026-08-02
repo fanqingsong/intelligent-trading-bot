@@ -5,10 +5,14 @@ WORKDIR /app
 RUN npm config set registry https://registry.npmmirror.com
 
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+RUN npm install \
+  && md5sum package-lock.json > node_modules/.package-lock-hash \
+  || md5sum package.json > node_modules/.package-lock-hash
 
 COPY frontend ./
+RUN chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 5173
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]

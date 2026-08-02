@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { api, type JobRef } from "../api";
+import PrefectLink from "../components/PrefectLink";
 
 export default function PipelinePage() {
   const [steps, setSteps] = useState<string[]>([]);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [jobId, setJobId] = useState<string | null>(null);
+  const [prefectUrl, setPrefectUrl] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [progress, setProgress] = useState("0");
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState("");
-  const [jobs, setJobs] = useState<any[]>([]);
+  const [jobs, setJobs] = useState<JobRef[]>([]);
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -65,14 +67,16 @@ export default function PipelinePage() {
     try {
       const res = await api.createJob(chosen);
       setJobId(res.job_id);
-      setStatus(res.status);
+      setPrefectUrl(res.prefect_ui_url || null);
+      setStatus(res.status || "queued");
       setProgress("0");
       attachLogs(res.job_id);
       const poll = setInterval(async () => {
         try {
           const j = await api.getJob(res.job_id);
-          setStatus(j.status);
+          setStatus(j.status || "");
           setProgress(j.progress || "0");
+          if (j.prefect_ui_url) setPrefectUrl(j.prefect_ui_url);
           if (j.status === "completed" || j.status === "failed") clearInterval(poll);
         } catch {
           clearInterval(poll);
@@ -104,7 +108,8 @@ export default function PipelinePage() {
         </button>
         {jobId && (
           <span className="muted">
-            Job <code>{jobId.slice(0, 8)}</code> · {status} · {progress}%
+            Job <code>{jobId.slice(0, 8)}</code> · {status} · {progress}%{" "}
+            <PrefectLink url={prefectUrl} />
           </span>
         )}
       </div>
@@ -124,6 +129,7 @@ export default function PipelinePage() {
                 <th>Status</th>
                 <th>Step</th>
                 <th>Progress</th>
+                <th>Prefect</th>
               </tr>
             </thead>
             <tbody>
@@ -135,6 +141,7 @@ export default function PipelinePage() {
                       style={{ padding: "0.2rem 0.5rem" }}
                       onClick={() => {
                         setJobId(j.job_id);
+                        setPrefectUrl(j.prefect_ui_url || null);
                         attachLogs(j.job_id);
                       }}
                     >
@@ -142,8 +149,11 @@ export default function PipelinePage() {
                     </button>
                   </td>
                   <td>{j.status}</td>
-                  <td>{j.current_step || "—"}</td>
-                  <td>{j.progress}%</td>
+                  <td>{(j as any).current_step || "—"}</td>
+                  <td>{(j as any).progress ?? "—"}%</td>
+                  <td>
+                    <PrefectLink url={j.prefect_ui_url} />
+                  </td>
                 </tr>
               ))}
             </tbody>

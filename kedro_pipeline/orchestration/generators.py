@@ -2,6 +2,7 @@ from typing import Tuple
 import asyncio
 
 import pandas as pd
+from joblib import Parallel, delayed
 
 from kedro_pipeline.common.utils import *
 from kedro_pipeline.classifiers.model_store import *
@@ -137,7 +138,103 @@ def predict_feature_set(df, fs, config, model_store: ModelStore) -> Tuple[pd.Dat
 
     return out_df, features
 
-def train_feature_set(df, fs, config) -> dict:
+def _as_classifier_y(series: pd.Series) -> pd.Series:
+    """Ensure binary labels are int 0/1 for sklearn/lightgbm classifiers.
+
+    Uses nullable ``Int64`` when NaNs are present (pre-dropna); plain ``int``
+    once the series is complete.
+    """
+    numeric = pd.to_numeric(series, errors="coerce")
+    non_null = numeric.dropna()
+    if non_null.empty:
+        return series
+    uniq = set(non_null.round().unique().tolist())
+    if uniq <= {0.0, 1.0}:
+        rounded = numeric.round()
+        if rounded.isna().any():
+            return rounded.astype("Int64")
+        return rounded.astype(int)
+    return series
+
+
+def _prepare_train_xy(df, train_features, label, model_config):
+    """Slice training X/y for one label×algo according to algo params."""
+    algo_every_nth_row = model_config.get("params", {}).get("every_nth_row")
+    train_df = df.iloc[::algo_every_nth_row, :] if algo_every_nth_row else df
+    algo_train_length = model_config.get("params", {}).get("length")
+    if algo_train_length:
+        train_df = train_df.tail(algo_train_length)
+    return train_df[train_features], _as_classifier_y(train_df[label])
+
+
+def _train_label_algo_job(
+    df,
+    train_features: list,
+    label: str,
+    model_config: dict,
+    config: dict,
+    persist_tags: dict | None,
+    *,
+    persist_in_worker: bool = False,
+):
+    """Train (+ optional MLflow persist) one label×algo pair. Loky-picklable.
+
+    When *persist_in_worker* is True, the job builds a fresh ``ModelStore`` and
+    trains inside ``training_run`` so framework autolog and pyfunc share a run.
+    """
+    algo_name = model_config.get("name")
+    algo_type = model_config.get("algo")
+    score_column_name = label + label_algo_separator + algo_name
+    df_X, df_y = _prepare_train_xy(df, train_features, label, model_config)
+
+    print(
+        f"Train '{score_column_name}'. Algorithm {algo_name}. Label: {label}. "
+        f"Train length {len(df_X)}. Train columns {len(df_X.columns)}"
+    )
+
+    if persist_in_worker:
+        from kedro_pipeline.classifiers.model_store import ModelStore
+
+        store = ModelStore(config)
+        with store.training_run(score_column_name, tags=persist_tags):
+            model_pair = _train_one(algo_type, df_X, df_y, model_config)
+            meta = _build_model_meta(
+                model_pair, model_config, df_X, df_y, label, config,
+            )
+            store.put_model_pair(
+                score_column_name,
+                meta["pair"],
+                tags=persist_tags,
+                metrics=meta.get("metrics"),
+                params=meta.get("params"),
+                sample_X=meta.get("sample_X"),
+                algo=meta.get("algo"),
+                into_active_run=True,
+            )
+    else:
+        model_pair = _train_one(algo_type, df_X, df_y, model_config)
+        meta = _build_model_meta(
+            model_pair, model_config, df_X, df_y, label, config,
+        )
+
+    return score_column_name, meta
+
+
+def cache_pairs_from_meta(model_store, models: dict) -> None:
+    """Populate an in-memory ModelStore cache from worker-returned meta dicts."""
+    if model_store is None:
+        return
+    for score_column_name, meta in models.items():
+        algo = meta.get("algo") or {}
+        model_store.model_pairs[score_column_name] = PairPythonModel(
+            pair=meta["pair"],
+            algo_type=algo.get("algo"),
+            algo_name=algo.get("name"),
+            params=dict(algo.get("params") or {}),
+        )
+
+
+def train_feature_set(df, fs, config, model_store=None, *, persist_tags: dict | None = None) -> dict:
     """Train every label×algo combo and return per-model metadata for MLflow.
 
     Each entry is::
@@ -145,60 +242,106 @@ def train_feature_set(df, fs, config) -> dict:
         {"pair": (model, scaler), "metrics": {...}, "params": {...},
          "sample_X": df_X.head(...), "algo": model_config}
 
-    The in-sample metrics + params are consumed by
-    :meth:`ModelStore.put_model_pair` when persisting to MLflow.
+    When *model_store* is provided, each model is trained inside
+    :meth:`ModelStore.training_run` and persisted via
+    ``put_model_pair(..., into_active_run=True)`` so framework autolog and the
+    custom pyfunc share one MLflow run. *persist_tags* are attached to that run
+    (e.g. ``rolling_step``).
+
+    Parallelism is controlled by ``config["train_parallel"]``::
+
+        {"use_multiprocessing": true, "max_workers": 4}
     """
 
     train_features, labels, algorithms = get_features_labels_algorithms(fs, config)
 
     # Only for train mode
     df = df.dropna(subset=train_features).reset_index(drop=True)
-    df = df.dropna(subset=labels).reset_index(drop=True)
-
-    models = dict()  # Here collect the resulted trained models + metadata
-
     for label in labels:
-        for model_config in algorithms:
+        df[label] = _as_classifier_y(df[label])
+    df = df.dropna(subset=labels).reset_index(drop=True)
+    for label in labels:
+        # After dropna, force numpy-friendly int dtypes for classifiers.
+        df[label] = _as_classifier_y(df[label])
 
-            algo_name = model_config.get("name")
-            algo_type = model_config.get("algo")
-            score_column_name = label + label_algo_separator + algo_name
+    jobs = [(label, model_config) for label in labels for model_config in algorithms]
+    tp = config.get("train_parallel") or {}
+    use_mp = bool(tp.get("use_multiprocessing", False)) and len(jobs) > 1
+    max_workers = tp.get("max_workers") or None
 
-            # Limit length according to the algorith train parameters
-            algo_every_nth_row = model_config.get("params", {}).get("every_nth_row")
-            if algo_every_nth_row:
-                train_df = df.iloc[::algo_every_nth_row, :]
-            else:
-                train_df = df
-            algo_train_length = model_config.get("params", {}).get("length")
-            if algo_train_length:
-                train_df = train_df.tail(algo_train_length)
+    models: dict = {}
 
-            df_X = train_df[train_features]
-            df_y = train_df[label]
+    if use_mp:
+        n_jobs = max_workers if max_workers is not None else len(jobs)
+        print(f"Parallel train: {len(jobs)} label×algo jobs (n_jobs={n_jobs}).")
+        # Create the shared MLflow experiment in the parent before workers race it.
+        if model_store is not None:
+            model_store._ensure_experiment()
+        results = Parallel(n_jobs=n_jobs, backend="loky", verbose=10)(
+            delayed(_train_label_algo_job)(
+                df, train_features, label, model_config, config, persist_tags,
+                persist_in_worker=model_store is not None,
+            )
+            for label, model_config in jobs
+        )
+        for score_column_name, meta in results:
+            models[score_column_name] = meta
+        cache_pairs_from_meta(model_store, models)
+        return models
 
-            print(f"Train '{score_column_name}'. Algorithm {algo_name}. Label: {label}. Train length {len(df_X)}. Train columns {len(df_X.columns)}")
+    for label, model_config in jobs:
+        algo_name = model_config.get("name")
+        algo_type = model_config.get("algo")
+        score_column_name = label + label_algo_separator + algo_name
+        df_X, df_y = _prepare_train_xy(df, train_features, label, model_config)
 
-            if algo_type == "gb":
-                from kedro_pipeline.classifiers.classifier_gb import train_gb
-                model_pair = train_gb(df_X, df_y, model_config)
-            elif algo_type == "nn":
-                from kedro_pipeline.classifiers.classifier_nn import train_nn
-                model_pair = train_nn(df_X, df_y, model_config)
-            elif algo_type == "lc":
-                from kedro_pipeline.classifiers.classifier_lc import train_lc
-                model_pair = train_lc(df_X, df_y, model_config)
-            elif algo_type == "svc":
-                from kedro_pipeline.classifiers.classifier_svc import train_svc
-                model_pair = train_svc(df_X, df_y, model_config)
-            else:
-                raise ValueError(f"Unknown algorithm type {algo_type}. Check algorithm list.")
+        print(
+            f"Train '{score_column_name}'. Algorithm {algo_name}. Label: {label}. "
+            f"Train length {len(df_X)}. Train columns {len(df_X.columns)}"
+        )
 
-            models[score_column_name] = _build_model_meta(
+        if model_store is not None:
+            with model_store.training_run(score_column_name, tags=persist_tags):
+                model_pair = _train_one(algo_type, df_X, df_y, model_config)
+                meta = _build_model_meta(
+                    model_pair, model_config, df_X, df_y, label, config,
+                )
+                model_store.put_model_pair(
+                    score_column_name,
+                    meta["pair"],
+                    tags=persist_tags,
+                    metrics=meta.get("metrics"),
+                    params=meta.get("params"),
+                    sample_X=meta.get("sample_X"),
+                    algo=meta.get("algo"),
+                    into_active_run=True,
+                )
+        else:
+            model_pair = _train_one(algo_type, df_X, df_y, model_config)
+            meta = _build_model_meta(
                 model_pair, model_config, df_X, df_y, label, config,
             )
 
+        models[score_column_name] = meta
+
     return models
+
+
+def _train_one(algo_type: str, df_X, df_y, model_config: dict) -> tuple:
+    """Dispatch to the algorithm-specific trainer."""
+    if algo_type == "gb":
+        from kedro_pipeline.classifiers.classifier_gb import train_gb
+        return train_gb(df_X, df_y, model_config)
+    if algo_type == "nn":
+        from kedro_pipeline.classifiers.classifier_nn import train_nn
+        return train_nn(df_X, df_y, model_config)
+    if algo_type == "lc":
+        from kedro_pipeline.classifiers.classifier_lc import train_lc
+        return train_lc(df_X, df_y, model_config)
+    if algo_type == "svc":
+        from kedro_pipeline.classifiers.classifier_svc import train_svc
+        return train_svc(df_X, df_y, model_config)
+    raise ValueError(f"Unknown algorithm type {algo_type}. Check algorithm list.")
 
 
 def _build_model_meta(model_pair, model_config, df_X, df_y, label, config) -> dict:

@@ -4,14 +4,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 import redis
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
+
+from backend.team_rbac import Caller, caller_dep, require_team
 
 from shared import (
     ALL_STEPS,
@@ -37,12 +39,14 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*", "X-ITB-User", "X-ITB-Teams", "X-ITB-Admin"],
 )
 
 PIPELINE_URL = os.environ.get("PIPELINE_URL", "http://localhost:8001")
+STATUS_SYNC_INTERVAL_S = float(os.environ.get("ITB_STATUS_SYNC_INTERVAL_S", "5"))
 
 _redis: redis.Redis | None = None
+_status_sync_task: asyncio.Task | None = None
 
 
 def rds() -> redis.Redis:
@@ -52,8 +56,20 @@ def rds() -> redis.Redis:
     return _redis
 
 
+async def _status_sync_loop() -> None:
+    from backend.watchlist_service import refresh_running_statuses
+
+    while True:
+        try:
+            await refresh_running_statuses()
+        except Exception as e:
+            print(f"WARN: status sync failed: {e}")
+        await asyncio.sleep(STATUS_SYNC_INTERVAL_S)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
+    global _status_sync_task
     try:
         ensure_control_plane_db()
     except Exception as e:
@@ -64,10 +80,29 @@ async def on_startup() -> None:
         start_scheduler()
     except Exception as e:
         print(f"WARN: scheduler start failed: {e}")
+    _status_sync_task = asyncio.create_task(_status_sync_loop())
+    # Resume unfinished train-all batches after crash / restart.
+    try:
+        from backend.watchlist_service import resume_open_train_batches
+
+        asyncio.create_task(resume_open_train_batches())
+    except Exception as e:
+        print(f"WARN: train-all resume schedule failed: {e}")
+    # Warm A-share code/name cache so Watchlist suggest is not cold on first keystroke.
+    try:
+        from shared.collectors.collector_ashare import warmup_ashare_stock_list
+
+        asyncio.create_task(asyncio.to_thread(warmup_ashare_stock_list))
+    except Exception as e:
+        print(f"WARN: ashare stock list warmup schedule failed: {e}")
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    global _status_sync_task
+    if _status_sync_task is not None:
+        _status_sync_task.cancel()
+        _status_sync_task = None
     try:
         from backend.scheduler import stop_scheduler
 
@@ -141,8 +176,18 @@ class WatchlistAddRequest(BaseModel):
     symbol: str
 
 
+class WatchlistImportRequest(BaseModel):
+    index: str  # sse50 | csi300 | 000016 | 000300
+
+
 class PredictRequest(BaseModel):
     symbols: list[str] | None = None
+    team: str | None = None
+
+
+class TrainAllRequest(BaseModel):
+    symbols: list[str] | None = None
+    team: str | None = None
 
 
 class ScheduleUpdate(BaseModel):
@@ -170,13 +215,16 @@ def watchlist_suggest(
 
 @app.get("/api/watchlist")
 async def watchlist_list():
-    from backend.watchlist_service import list_items, refresh_running_statuses
+    from backend.watchlist_service import (
+        enrich_items_with_job_progress,
+        list_items,
+        refresh_running_statuses,
+        symbol_signals,
+    )
 
     await refresh_running_statuses()
-    items = list_items()
+    items = await enrich_items_with_job_progress(list_items())
     # Attach latest signal summary (lightweight)
-    from backend.watchlist_service import symbol_signals
-
     enriched = []
     for item in items:
         sig = symbol_signals(item["symbol"])
@@ -204,6 +252,18 @@ def watchlist_add(req: WatchlistAddRequest):
     return item
 
 
+@app.post("/api/watchlist/import")
+def watchlist_import(req: WatchlistImportRequest):
+    from backend.watchlist_service import import_index
+
+    try:
+        return import_index(req.index)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(503, f"Index import failed: {e}") from e
+
+
 @app.delete("/api/watchlist/{symbol}")
 def watchlist_delete(symbol: str):
     from backend.watchlist_service import delete_item
@@ -214,22 +274,55 @@ def watchlist_delete(symbol: str):
 
 
 @app.post("/api/watchlist/predict")
-async def watchlist_predict(req: PredictRequest | None = None):
+async def watchlist_predict(
+    caller: Annotated[Caller, Depends(caller_dep)],
+    req: PredictRequest | None = None,
+):
     from backend.watchlist_service import predict_symbols
 
     body = req or PredictRequest()
+    require_team(caller, body.team)
     try:
-        return await predict_symbols(symbols=body.symbols, note="manual")
+        return await predict_symbols(symbols=body.symbols, note="manual", team=body.team)
     except Exception as e:
         raise HTTPException(503, str(e)) from e
 
 
+@app.post("/api/watchlist/train")
+async def watchlist_train_all(
+    caller: Annotated[Caller, Depends(caller_dep)],
+    req: TrainAllRequest | None = None,
+):
+    """Train all watchlist symbols sequentially (checkpointed; resumes after restart)."""
+    from backend.watchlist_service import train_symbols
+
+    body = req or TrainAllRequest()
+    require_team(caller, body.team)
+    try:
+        return await train_symbols(symbols=body.symbols, note="manual", team=body.team)
+    except Exception as e:
+        raise HTTPException(503, str(e)) from e
+
+
+@app.get("/api/watchlist/train/active")
+def watchlist_train_active():
+    from backend.watchlist_service import active_train_batch
+
+    batch = active_train_batch()
+    return {"batch": batch}
+
+
 @app.post("/api/watchlist/{symbol}/train")
-async def watchlist_train(symbol: str):
+async def watchlist_train(
+    symbol: str,
+    caller: Annotated[Caller, Depends(caller_dep)],
+    team: str | None = Query(None, description="Prefect team deployment / tag"),
+):
     from backend.watchlist_service import train_symbol
 
+    require_team(caller, team)
     try:
-        return await train_symbol(symbol)
+        return await train_symbol(symbol, team=team)
     except KeyError:
         raise HTTPException(404, "Symbol not in watchlist") from None
     except Exception as e:
@@ -269,6 +362,7 @@ def put_schedule_api(body: ScheduleUpdate):
 class PipelineJobRequest(BaseModel):
     steps: list[str] = Field(default_factory=lambda: list(PIPELINE_STEPS))
     config_overrides: dict[str, Any] | None = None
+    team: str | None = None
 
 
 @app.get("/api/pipeline/steps")
@@ -283,13 +377,19 @@ def pipeline_steps():
 
 
 @app.post("/api/pipeline/jobs")
-async def create_pipeline_job(req: PipelineJobRequest):
+async def create_pipeline_job(
+    req: PipelineJobRequest,
+    caller: Annotated[Caller, Depends(caller_dep)],
+):
+    require_team(caller, req.team)
     payload: dict[str, Any] = {
         "steps": req.steps,
         "config_path": str(get_config_path()),
     }
     if req.config_overrides:
         payload["config_overrides"] = req.config_overrides
+    if req.team:
+        payload["team"] = req.team
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             resp = await client.post(f"{PIPELINE_URL}/internal/jobs", json=payload)
@@ -297,39 +397,88 @@ async def create_pipeline_job(req: PipelineJobRequest):
             raise HTTPException(503, f"Pipeline service unavailable: {e}") from e
     if resp.status_code >= 400:
         raise HTTPException(resp.status_code, resp.text)
-    return resp.json()
+    from backend.prefect_links import enrich_job
+
+    return enrich_job(resp.json())
 
 
 @app.get("/api/pipeline/jobs")
-def list_recent_jobs():
-    ids = rds().lrange("itb:jobs:recent", 0, 19)
-    jobs = []
-    for jid in ids:
-        data = rds().hgetall(f"itb:job:{jid}")
-        if data:
-            data["job_id"] = jid
-            if "steps" in data:
-                try:
-                    data["steps"] = json.loads(data["steps"])
-                except Exception:
-                    pass
-            jobs.append(data)
-    return {"jobs": jobs}
+async def list_recent_jobs():
+    from backend.prefect_links import (
+        enrich_job,
+        job_source,
+        list_recent_prefect_jobs,
+        redis_mirror_enabled,
+    )
+
+    source = job_source()
+    jobs: list[dict[str, Any]] = []
+    if source in ("redis", "hybrid") and redis_mirror_enabled():
+        try:
+            ids = rds().lrange("itb:jobs:recent", 0, 19)
+            for jid in ids:
+                data = rds().hgetall(f"itb:job:{jid}")
+                if data:
+                    data["job_id"] = jid
+                    if "steps" in data:
+                        try:
+                            data["steps"] = json.loads(data["steps"])
+                        except Exception:
+                            pass
+                    data["source"] = "redis"
+                    jobs.append(enrich_job(data))
+        except Exception:
+            jobs = []
+
+    if source == "prefect" or (source == "hybrid" and not jobs):
+        jobs = await list_recent_prefect_jobs(20)
+    elif source == "hybrid" and jobs:
+        pref = await list_recent_prefect_jobs(20)
+        by_id = {j.get("job_id"): j for j in pref}
+        for j in jobs:
+            p = by_id.get(j.get("job_id"))
+            if p:
+                j.setdefault("prefect_flow_run_id", p.get("prefect_flow_run_id"))
+                j.setdefault("prefect_ui_url", p.get("prefect_ui_url"))
+            enrich_job(j)
+    return {"jobs": jobs, "source": source}
 
 
 @app.get("/api/pipeline/jobs/{job_id}")
 async def get_pipeline_job(job_id: str):
+    from backend.prefect_links import enrich_job, fetch_flow_run
+
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{job_id}")
         except httpx.RequestError as e:
             raise HTTPException(503, f"Pipeline service unavailable: {e}") from e
     if resp.status_code == 404:
+        # Redis expired: try Prefect tag lookup via recent runs
+        for job in await list_recent_prefect_jobs_safe():
+            if job.get("job_id") == job_id and job.get("prefect_flow_run_id"):
+                pref = await fetch_flow_run(job["prefect_flow_run_id"])
+                if pref:
+                    return enrich_job({**job, **pref})
         raise HTTPException(404, "Job not found")
     if resp.status_code >= 400:
         raise HTTPException(resp.status_code, resp.text)
-    return resp.json()
+    data = enrich_job(resp.json())
+    if data.get("prefect_flow_run_id"):
+        pref = await fetch_flow_run(data["prefect_flow_run_id"])
+        if pref:
+            data.setdefault("prefect_ui_url", pref.get("prefect_ui_url"))
+            # Prefer Redis progress/status while present; keep Prefect link.
+    return data
 
+
+async def list_recent_prefect_jobs_safe() -> list[dict[str, Any]]:
+    from backend.prefect_links import list_recent_prefect_jobs
+
+    try:
+        return await list_recent_prefect_jobs(50)
+    except Exception:
+        return []
 
 @app.get("/api/pipeline/jobs/{job_id}/logs")
 async def stream_job_logs(job_id: str):
@@ -535,8 +684,20 @@ def recent_signals(
 
 # ----- Health / dashboard -----
 
+@app.get("/api/prefect/info")
+def prefect_info_api():
+    from backend.prefect_links import prefect_info
+    from backend.team_rbac import rbac_enabled
+
+    info = prefect_info()
+    info["rbac_enabled"] = rbac_enabled()
+    return info
+
+
 @app.get("/health")
 async def health():
+    from backend.prefect_links import prefect_api_url, prefect_ui_url
+
     services: dict[str, Any] = {"api": "ok"}
     try:
         rds().ping()
@@ -560,7 +721,17 @@ async def health():
             services["pipeline"] = "ok" if resp.status_code == 200 else f"status {resp.status_code}"
         except Exception as e:
             services["pipeline"] = f"error: {e}"
-    return {"status": "ok", "services": services}
+        if prefect_api_url():
+            try:
+                resp = await client.get(f"{prefect_api_url()}/health")
+                services["prefect"] = "ok" if resp.status_code == 200 else f"status {resp.status_code}"
+            except Exception as e:
+                services["prefect"] = f"error: {e}"
+    return {
+        "status": "ok",
+        "services": services,
+        "prefect_ui_url": prefect_ui_url(),
+    }
 
 
 @app.get("/api/dashboard")
@@ -568,7 +739,7 @@ async def dashboard():
     from backend.watchlist_service import list_items
 
     health_data = await health()
-    jobs = list_recent_jobs()
+    jobs = await list_recent_jobs()
     config = load_config_dict()
     items = list_items()
     return {
@@ -578,4 +749,5 @@ async def dashboard():
         "symbol": config.get("symbol"),
         "freq": config.get("freq"),
         "description": config.get("description"),
+        "prefect_ui_url": health_data.get("prefect_ui_url"),
     }

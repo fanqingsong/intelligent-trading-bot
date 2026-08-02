@@ -19,6 +19,12 @@
     "predict_length": 60,
     "append_overlap_records": 5,
 
+    // Parallelise label×algo training inside train_feature_set (loky).
+    "train_parallel": {
+        "use_multiprocessing": true,
+        "max_workers": 4
+    },
+
     // === DOWNLOAD AND MERGE ===
 
     "data_sources": [

@@ -33,6 +33,49 @@ from kedro_pipeline.common.utils import (
 
 from ..catalog.paths import select_window
 from .helpers import append_feature_list, new_model_store, store_scores
+from .incremental import (
+    apply_incremental_columns,
+    can_use_incremental,
+    compute_window_size,
+    resolve_last_rows,
+)
+
+
+def _symbol_from_config(config: dict) -> str:
+    from shared.collectors.collector_ashare import normalize_ashare_symbol
+
+    raw = str(config.get("symbol") or "")
+    try:
+        return normalize_ashare_symbol(raw)
+    except ValueError:
+        return raw
+
+
+def _coerce_binary_label(series: pd.Series) -> pd.Series:
+    """Cast classification labels to nullable Int64 (0/1).
+
+    After Postgres JSONB round-trips or incremental stitch, bool labels often
+    become float/object (NaN upcasts). Classifiers then raise
+    ``Unknown label type: unknown``.
+    """
+    if ptypes.is_integer_dtype(series) and not ptypes.is_bool_dtype(series):
+        return series
+    numeric = pd.to_numeric(series, errors="coerce")
+    # Keep NaNs; train_feature_set drops them. Round 0.0/1.0 → 0/1.
+    return numeric.round().astype("Int64")
+
+
+def _load_existing_frame(config: dict, kind: str) -> pd.DataFrame:
+    from shared.db.frames import load_frame
+
+    symbol = _symbol_from_config(config)
+    if not symbol:
+        return pd.DataFrame()
+    try:
+        return load_frame(symbol, kind, time_column=config["time_column"])
+    except Exception as exc:
+        print(f"WARNING: could not load existing {kind} for incremental update: {exc}")
+        return pd.DataFrame()
 
 
 # --------------------------------------------------------------------------- #
@@ -125,18 +168,51 @@ def features(merged_data: pd.DataFrame, config: dict) -> pd.DataFrame:
         print("ERROR: no feature sets defined. Nothing to process.")
         return df
 
+    # Known train feature names (if configured) let us reuse Postgres history.
+    required = list(config.get("train_features") or [])
+    existing = _load_existing_frame(config, "features")
+    last_rows = resolve_last_rows(config, len(df), len(existing))
+    use_incremental = last_rows > 0 and can_use_incremental(
+        existing, df, config["time_column"], required_columns=required or None,
+    )
+
     model_store = new_model_store(config)
 
     all_features: list[str] = []
-    for i, fs in enumerate(feature_sets):
-        fs_now = datetime.now()
-        print(f"Start feature set {i}/{len(feature_sets)}. Generator {fs.get('generator')}...")
-        df, new_features = generate_feature_set(df, fs, config, model_store, last_rows=0)
-        all_features.extend(new_features)
-        print(f"Finished feature set {i}/{len(feature_sets)}. Features: {len(new_features)}. Time: {str((datetime.now() - fs_now)).split('.')[0]}")
+    if use_incremental:
+        win = compute_window_size(config, last_rows)
+        compute_df = df.tail(win).copy().reset_index(drop=True)
+        print(f"Incremental features: recompute last {last_rows} rows (window={win}).")
+        for i, fs in enumerate(feature_sets):
+            fs_now = datetime.now()
+            print(f"Start feature set {i}/{len(feature_sets)}. Generator {fs.get('generator')}...")
+            compute_df, new_features = generate_feature_set(
+                compute_df, fs, config, model_store, last_rows=0,
+            )
+            all_features.extend(new_features)
+            print(
+                f"Finished feature set {i}/{len(feature_sets)}. Features: {len(new_features)}. "
+                f"Time: {str((datetime.now() - fs_now)).split('.')[0]}"
+            )
+        updated_tail = compute_df.tail(last_rows)
+        df = apply_incremental_columns(
+            df, existing, updated_tail, config["time_column"], all_features,
+        )
+    else:
+        if last_rows == 0:
+            print("Full feature recompute (no usable existing features frame).")
+        for i, fs in enumerate(feature_sets):
+            fs_now = datetime.now()
+            print(f"Start feature set {i}/{len(feature_sets)}. Generator {fs.get('generator')}...")
+            df, new_features = generate_feature_set(df, fs, config, model_store, last_rows=0)
+            all_features.extend(new_features)
+            print(
+                f"Finished feature set {i}/{len(feature_sets)}. Features: {len(new_features)}. "
+                f"Time: {str((datetime.now() - fs_now)).split('.')[0]}"
+            )
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    na_df = df[df[all_features].isna().any(axis=1)]
+    na_df = df[df[all_features].isna().any(axis=1)] if all_features else pd.DataFrame()
     if len(na_df) > 0:
         print(f"WARNING: There exist {len(na_df)} rows with NULLs in some feature columns")
 
@@ -162,15 +238,47 @@ def labels(features_data: pd.DataFrame, config: dict) -> pd.DataFrame:
         print("ERROR: no label sets defined. Nothing to process.")
         return df
 
+    required = list(config.get("labels") or [])
+    existing = _load_existing_frame(config, "matrix")
+    last_rows = resolve_last_rows(config, len(df), len(existing))
+    use_incremental = last_rows > 0 and can_use_incremental(
+        existing, df, config["time_column"], required_columns=required or None,
+    )
+
     model_store = new_model_store(config)
 
     all_features: list[str] = []
-    for i, fs in enumerate(label_sets):
-        fs_now = datetime.now()
-        print(f"Start label set {i}/{len(label_sets)}. Generator {fs.get('generator')}...")
-        df, new_features = generate_feature_set(df, fs, config, model_store, last_rows=0)
-        all_features.extend(new_features)
-        print(f"Finished label set {i}/{len(label_sets)}. Labels: {len(new_features)}. Time: {str((datetime.now() - fs_now)).split('.')[0]}")
+    if use_incremental:
+        win = compute_window_size(config, last_rows)
+        compute_df = df.tail(win).copy().reset_index(drop=True)
+        print(f"Incremental labels: recompute last {last_rows} rows (window={win}).")
+        for i, fs in enumerate(label_sets):
+            fs_now = datetime.now()
+            print(f"Start label set {i}/{len(label_sets)}. Generator {fs.get('generator')}...")
+            compute_df, new_features = generate_feature_set(
+                compute_df, fs, config, model_store, last_rows=0,
+            )
+            all_features.extend(new_features)
+            print(
+                f"Finished label set {i}/{len(label_sets)}. Labels: {len(new_features)}. "
+                f"Time: {str((datetime.now() - fs_now)).split('.')[0]}"
+            )
+        updated_tail = compute_df.tail(last_rows)
+        df = apply_incremental_columns(
+            df, existing, updated_tail, config["time_column"], all_features,
+        )
+    else:
+        if last_rows == 0:
+            print("Full label recompute (no usable existing matrix frame).")
+        for i, fs in enumerate(label_sets):
+            fs_now = datetime.now()
+            print(f"Start label set {i}/{len(label_sets)}. Generator {fs.get('generator')}...")
+            df, new_features = generate_feature_set(df, fs, config, model_store, last_rows=0)
+            all_features.extend(new_features)
+            print(
+                f"Finished label set {i}/{len(label_sets)}. Labels: {len(new_features)}. "
+                f"Time: {str((datetime.now() - fs_now)).split('.')[0]}"
+            )
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
@@ -189,8 +297,9 @@ def train(matrix_data: pd.DataFrame, config: dict) -> dict:
     """Train models for all label×algo combinations and persist to MLflow.
 
     Mirrors ``pipeline/steps/train.py``. The returned dict is consumed by
-    :func:`predict` (in-memory within one run); persistence to the MLflow
-    registry happens via ``ModelStore.put_model_pair``.
+    :func:`predict` (in-memory within one run). Each model is trained inside
+    ``ModelStore.training_run`` so framework autolog and pyfunc registration
+    share one MLflow run.
     """
     now = datetime.now()
     time_column = config["time_column"]
@@ -216,8 +325,7 @@ def train(matrix_data: pd.DataFrame, config: dict) -> dict:
     df = df[out_columns + [x for x in all_features if x not in out_columns]]
 
     for label in labels_all:
-        if np.issubdtype(df[label].dtype, bool):
-            df[label] = df[label].astype(int)
+        df[label] = _coerce_binary_label(df[label])
 
     label_horizon = config["label_horizon"]
     train_length = config.get("train_length")
@@ -245,19 +353,10 @@ def train(matrix_data: pd.DataFrame, config: dict) -> dict:
     for i, fs in enumerate(train_feature_sets):
         fs_now = datetime.now()
         print(f"Start train feature set {i}/{len(train_feature_sets)}. Generator {fs.get('generator')}...")
-        fs_models = train_feature_set(df, fs, config)
+        fs_models = train_feature_set(df, fs, config, model_store=model_store)
         models.update(fs_models)
         print(f"Finished train feature set {i}/{len(train_feature_sets)}. Time: {str((datetime.now() - fs_now)).split('.')[0]}")
 
-    for score_column_name, meta in models.items():
-        model_store.put_model_pair(
-            score_column_name,
-            meta["pair"],
-            metrics=meta.get("metrics"),
-            params=meta.get("params"),
-            sample_X=meta.get("sample_X"),
-            algo=meta.get("algo"),
-        )
     print(f"Stored {len(models)} model pairs to MLflow registry (prefix '{model_store.registry_prefix}').")
 
     elapsed = datetime.now() - now

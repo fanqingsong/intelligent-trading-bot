@@ -39,7 +39,7 @@ The data provider is specified in the `venue` attribute. Currently supported:
 
 -   **Market:** Shanghai / Shenzhen only (codes starting with `6`/`9` → SH, `0`/`3` → SZ). Beijing Stock Exchange is not included.
 -   **Symbols:** Store 6-digit codes in `symbol` and `data_sources[].folder` (e.g. `600519`, `000001`).
--   **Name resolution:** Helpers in `shared/collectors/collector_ashare.py` load a cached code/name table (`ak.stock_info_a_code_name`, 24h TTL):
+-   **Name resolution:** Helpers in `shared/collectors/collector_ashare.py` load a cached code/name table (`ak.stock_info_a_code_name`, 24h TTL; memory → Postgres `ashare_stocks` → network; API startup warms the cache):
     -   `search_ashare_stocks(query)` — typeahead by code prefix or name substring
     -   `resolve_ashare_query(query)` — resolve a code or unique Chinese name to one code
     -   Web API: `GET /api/watchlist/suggest`, `POST /api/watchlist` (accepts code or name)

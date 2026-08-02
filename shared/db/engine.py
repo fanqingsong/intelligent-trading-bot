@@ -32,7 +32,7 @@ def get_session_factory() -> sessionmaker[Session]:
 
 def init_db() -> None:
     """Create tables already registered on ``Base.metadata`` if missing."""
-    from shared.db.models import Base, MarketFrame  # noqa: F401
+    from shared.db.models import AshareStock, Base, MarketFrame  # noqa: F401
 
     engine = get_engine()
     Base.metadata.create_all(engine)

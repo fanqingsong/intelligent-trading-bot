@@ -156,6 +156,37 @@ def predict_rolling(matrix_data: pd.DataFrame, config: dict) -> pd.DataFrame:
     return out_df
 
 
+def _train_feature_set_in_worker(train_df, fs, config, persist_tags):
+    """Train+persist inside a joblib worker (fresh ModelStore, not pickled)."""
+    from kedro_pipeline.classifiers.model_store import ModelStore
+
+    # Avoid nested loky pools when label×algo parallel is also enabled.
+    cfg = dict(config)
+    tp = dict(cfg.get("train_parallel") or {})
+    tp["use_multiprocessing"] = False
+    cfg["train_parallel"] = tp
+
+    return train_feature_set(
+        train_df, fs, cfg,
+        model_store=ModelStore(cfg),
+        persist_tags=persist_tags,
+    )
+
+
+def _cache_pairs_from_meta(model_store, models: dict) -> None:
+    """Populate the parent in-memory cache from worker-returned meta dicts."""
+    from kedro_pipeline.classifiers.model_store import PairPythonModel
+
+    for score_column_name, meta in models.items():
+        algo = meta.get("algo") or {}
+        model_store.model_pairs[score_column_name] = PairPythonModel(
+            pair=meta["pair"],
+            algo_type=algo.get("algo"),
+            algo_name=algo.get("name"),
+            params=dict(algo.get("params") or {}),
+        )
+
+
 def _execute_train_predict_step(config, train_df, predict_df, parallel, model_store, step):
     """One rolling step: train all feature sets, persist, then predict.
 
@@ -163,28 +194,29 @@ def _execute_train_predict_step(config, train_df, predict_df, parallel, model_st
     passed explicitly (no global). ``step`` tags the logged MLflow versions.
     """
     train_feature_sets = config.get("train_feature_sets", [])
+    persist_tags = {"rolling_step": str(step)}
 
     print(f"Start train all models from {len(train_feature_sets)} feature sets. Train size: {len(train_df)}")
     models: dict[str, tuple] = {}
     if isinstance(parallel, Parallel):
-        results = parallel(delayed(train_feature_set)(train_df, fs, config) for fs in train_feature_sets)
+        # Workers build their own ModelStore from config (avoid pickling the
+        # parent store) and train+put inside the same MLflow run for autolog.
+        results = parallel(
+            delayed(_train_feature_set_in_worker)(train_df, fs, config, persist_tags)
+            for fs in train_feature_sets
+        )
         for fs_models in results:
             models.update(fs_models)
+        _cache_pairs_from_meta(model_store, models)
     else:
         for fs in train_feature_sets:
-            models.update(train_feature_set(train_df, fs, config))
-
-    # Persist each trained pair to MLflow (new version per rolling step).
-    for score_column_name, meta in models.items():
-        model_store.put_model_pair(
-            score_column_name,
-            meta["pair"],
-            tags={"rolling_step": str(step)},
-            metrics=meta.get("metrics"),
-            params=meta.get("params"),
-            sample_X=meta.get("sample_X"),
-            algo=meta.get("algo"),
-        )
+            models.update(
+                train_feature_set(
+                    train_df, fs, config,
+                    model_store=model_store,
+                    persist_tags=persist_tags,
+                )
+            )
     print(f"Stored {len(models)} model pairs to MLflow registry (rolling step {step}).")
 
     print(f"Start predictions for {len(predict_df)} records.")

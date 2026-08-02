@@ -37,6 +37,12 @@ services:
       - DATABASE_URL=postgresql+psycopg://itb:itb@postgres:5432/itb
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - PYTHONPATH=/app
+      - PREFECT_API_URL=http://prefect-server:4200/api
+      - PREFECT_UI_URL=http://localhost:4200
+      - ITB_STATUS_SYNC_INTERVAL_S=5
+      - ITB_JOB_SOURCE=hybrid
+      - ITB_REDIS_JOB_MIRROR=1
+      - ITB_RBAC_ENABLED=0
     volumes:
       - ..:/app
       - ../data:/app/data
@@ -48,6 +54,8 @@ services:
       postgres:
         condition: service_healthy
       pipeline:
+        condition: service_started
+      prefect-server:
         condition: service_started
     command: >
       uvicorn backend.main:app
@@ -67,6 +75,9 @@ services:
       - DATABASE_URL=postgresql+psycopg://itb:itb@postgres:5432/itb
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - PYTHONPATH=/app
+      - PREFECT_API_URL=http://prefect-server:4200/api
+      - PREFECT_UI_URL=http://localhost:4200
+      - ITB_JOB_EXECUTOR=prefect
     volumes:
       - ..:/app
       - ../data:/app/data
@@ -79,10 +90,86 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_started
+      prefect-server:
+        condition: service_healthy
     command: >
       uvicorn kedro_pipeline.main:app
       --host 0.0.0.0 --port 8001
       --reload --reload-dir /app/shared --reload-dir /app/kedro_pipeline
+
+  # Self-hosted Prefect 3 (SQLite volume). Durable queue for Kedro jobs.
+  # Keep client (requirements) and this image on the same Prefect minor.
+  # China mirror currently only publishes :3-latest (resolved to 3.6.4 here).
+  prefect-server:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/prefecthq/prefect:3-latest
+    ports:
+      - "4200:4200"
+    environment:
+      - PREFECT_SERVER_API_HOST=0.0.0.0
+      - PREFECT_UI_API_URL=http://localhost:4200/api
+    volumes:
+      - prefect_data:/root/.prefect
+    command: prefect server start --host 0.0.0.0
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request as u; u.urlopen('http://localhost:4200/api/health', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # Serves itb-kedro-job/default + itb-daily-predict/default (cron).
+  prefect-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.pipeline
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CONFIG_PATH=configs/config-dev.jsonc
+      - DATA_FOLDER=/app/data
+      - DATABASE_URL=postgresql+psycopg://itb:itb@postgres:5432/itb
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - PYTHONPATH=/app
+      - PREFECT_API_URL=http://prefect-server:4200/api
+      - PREFECT_UI_URL=http://localhost:4200
+      - PIPELINE_URL=http://pipeline:8001
+      - ITB_PREFECT_SERVE_LIMIT=2
+      - ITB_TRAIN_CONCURRENCY=1
+      - ITB_PREDICT_CONCURRENCY=2
+      - ITB_PREDICT_CRON=0 16 * * 1-5
+      - ITB_PREDICT_TZ=Asia/Shanghai
+      - ITB_PREDICT_ENABLED=true
+      - ITB_KEDRO_EXECUTION=fine
+      - ITB_TEAMS=default
+      - ITB_TEAM=default
+      - ITB_ENV=dev
+      - ITB_NODE_RETRIES_DOWNLOAD=2
+    volumes:
+      - ..:/app
+      - ../data:/app/data
+      - ../configs:/app/configs
+      - ../conf:/app/conf
+      - mlflow_artifacts:/app/data/mlruns
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+      prefect-server:
+        condition: service_healthy
+      pipeline:
+        condition: service_started
+    # Explicit entrypoint so a locally committed image cannot override CMD with `sleep`.
+    entrypoint: ["python", "-m", "kedro_pipeline.orchestration.prefect_serve"]
+    command: []
+    restart: on-failure
 
   mlflow:
     build:
@@ -112,9 +199,11 @@ services:
       - VITE_API_BASE=http://localhost:8000
     volumes:
       - ../frontend:/app
+      # Persists across rebuilds; entrypoint re-syncs when package-lock.json changes
       - web_node_modules:/app/node_modules
     depends_on:
       - api
+    # entrypoint: frontend/docker-entrypoint.sh (sync deps, then exec CMD)
     command: npm run dev -- --host 0.0.0.0 --port 5173
 
   # Kedro-Viz: pipeline DAG browser (reuses pipeline image; needs node imports)
@@ -143,3 +232,4 @@ volumes:
   postgres_data:
   web_node_modules:
   mlflow_artifacts:
+  prefect_data:

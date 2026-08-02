@@ -1,16 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api";
+import { badgeClass } from "../lib/status";
 
 type SuggestItem = {
   code: string;
   name: string;
   exchange: string;
   label: string;
-};
-
-type AlgoSummary = {
-  recommendation?: string;
-  trade_score?: number | null;
 };
 
 type WatchItem = {
@@ -20,31 +17,7 @@ type WatchItem = {
   train_status: string;
   predict_status: string;
   last_error?: string;
-  last_trained_at?: string | null;
-  last_predicted_at?: string | null;
-  vote?: string;
-  algorithms?: Record<string, AlgoSummary>;
-  signal_available?: boolean;
-  close?: number | null;
-  signal_timestamp?: string | null;
-  last_train_job_id?: string;
-  last_predict_job_id?: string;
 };
-
-const ALGOS = ["svc", "gb", "nn", "lc"] as const;
-
-function badgeClass(status: string) {
-  if (status === "ready" || status === "completed") return "badge ok";
-  if (status === "running" || status === "queued") return "badge run";
-  if (status === "failed" || status === "skipped") return "badge fail";
-  return "badge";
-}
-
-function recClass(rec?: string) {
-  if (rec === "BUY") return "rec buy";
-  if (rec === "SELL") return "rec sell";
-  return "rec hold";
-}
 
 export default function WatchlistPage() {
   const [items, setItems] = useState<WatchItem[]>([]);
@@ -55,21 +28,15 @@ export default function WatchlistPage() {
   const [highlight, setHighlight] = useState(0);
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
   const [busy, setBusy] = useState("");
-  const [logs, setLogs] = useState<string[]>([]);
-  const [schedule, setSchedule] = useState<any>(null);
-  const [cronEdit, setCronEdit] = useState("0 16 * * 1-5");
-  const esRef = useRef<EventSource | null>(null);
-  const logEndRef = useRef<HTMLDivElement | null>(null);
   const blurTimer = useRef<number | null>(null);
   const suggestSeq = useRef(0);
 
   const load = useCallback(async () => {
     try {
-      const [wl, sch] = await Promise.all([api.watchlist(), api.getSchedule()]);
+      const wl = await api.watchlist();
       setItems(wl.items || []);
-      setSchedule(sch);
-      setCronEdit(sch.predict_cron || "0 16 * * 1-5");
       setError("");
     } catch (e: any) {
       setError(String(e.message || e));
@@ -81,14 +48,9 @@ export default function WatchlistPage() {
     const t = window.setInterval(load, 5000);
     return () => {
       window.clearInterval(t);
-      esRef.current?.close();
       if (blurTimer.current) window.clearTimeout(blurTimer.current);
     };
   }, [load]);
-
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
 
   useEffect(() => {
     const q = query.trim();
@@ -138,23 +100,6 @@ export default function WatchlistPage() {
     }
   };
 
-  const attachLogs = (jobId: string) => {
-    esRef.current?.close();
-    setLogs([]);
-    const es = new EventSource(api.logsUrl(jobId));
-    esRef.current = es;
-    es.addEventListener("log", (ev) => {
-      setLogs((prev) => [...prev.slice(-400), (ev as MessageEvent).data]);
-    });
-    es.addEventListener("done", () => {
-      es.close();
-      load();
-    });
-    es.addEventListener("error", () => {
-      es.close();
-    });
-  };
-
   const addSymbol = async () => {
     const q = (selected?.code || query).trim();
     if (!q) return;
@@ -184,65 +129,19 @@ export default function WatchlistPage() {
     }
   };
 
-  const trainOne = async (symbol: string) => {
-    setBusy(`train-${symbol}`);
+  const importIndex = async (index: "sse50" | "csi300", label: string) => {
+    if (!window.confirm(`将导入${label}全部成分股到关注列表（已存在的会跳过），是否继续？`)) {
+      return;
+    }
+    setBusy(`import-${index}`);
     setError("");
+    setInfo("");
     try {
-      const res = await api.watchlistTrain(symbol);
-      if (res.job_id) attachLogs(res.job_id);
+      const res = await api.watchlistImport(index);
+      setInfo(
+        `已导入${res.index_name}：新增 ${res.added} 只，跳过 ${res.skipped} 只（共 ${res.total} 只成分股）`,
+      );
       await load();
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const predictAll = async () => {
-    setBusy("predict");
-    setError("");
-    try {
-      const res = await api.watchlistPredict();
-      const first = (res.jobs || [])[0];
-      if (first?.job_id) attachLogs(first.job_id);
-      if ((res.skipped || []).length && !(res.jobs || []).length) {
-        setError(
-          `Skipped untrained: ${(res.skipped || []).map((s: any) => s.symbol).join(", ")}`,
-        );
-      }
-      await load();
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const saveSchedule = async () => {
-    setBusy("schedule");
-    try {
-      const sch = await api.putSchedule({
-        predict_enabled: !!schedule?.predict_enabled,
-        predict_cron: cronEdit,
-        timezone: schedule?.timezone || "Asia/Shanghai",
-      });
-      setSchedule(sch);
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const toggleSchedule = async () => {
-    setBusy("schedule");
-    try {
-      const sch = await api.putSchedule({
-        predict_enabled: !schedule?.predict_enabled,
-        predict_cron: cronEdit,
-        timezone: schedule?.timezone || "Asia/Shanghai",
-      });
-      setSchedule(sch);
     } catch (e: any) {
       setError(String(e.message || e));
     } finally {
@@ -253,10 +152,9 @@ export default function WatchlistPage() {
   return (
     <div>
       <h1 className="page-title">Watchlist</h1>
-      <p className="page-sub">
-        维护关注股票 · 手动更新模型 · 一键/盘后预测 · 四算法信号 + 多数投票
-      </p>
+      <p className="page-sub">维护关注股票 · 训练与信号见 Models / Signals</p>
       {error && <p className="error">{error}</p>}
+      {info && <p className="muted">{info}</p>}
 
       <div className="panel" style={{ marginBottom: "1rem" }}>
         <div className="btn-row" style={{ alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -300,35 +198,25 @@ export default function WatchlistPage() {
           <button className="btn primary" disabled={!!busy} onClick={addSymbol}>
             加入列表
           </button>
-          <button className="btn" disabled={!!busy || items.length === 0} onClick={predictAll}>
-            一键预测
-          </button>
         </div>
-      </div>
-
-      <div className="panel" style={{ marginBottom: "1rem" }}>
-        <h3 style={{ marginTop: 0 }}>盘后定时预测</h3>
-        <div className="btn-row" style={{ flexWrap: "wrap" }}>
-          <label className="muted" style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-            <input
-              type="checkbox"
-              checked={!!schedule?.predict_enabled}
-              onChange={toggleSchedule}
-              disabled={!!busy}
-            />
-            启用（默认 cron: 工作日 16:00 Asia/Shanghai）
-          </label>
-          <input
-            className="input"
-            style={{ maxWidth: 180 }}
-            value={cronEdit}
-            onChange={(e) => setCronEdit(e.target.value)}
-            placeholder="0 16 * * 1-5"
-          />
-          <button className="btn" disabled={!!busy} onClick={saveSchedule}>
-            保存调度
+        <div className="btn-row" style={{ marginTop: "0.75rem", flexWrap: "wrap" }}>
+          <button
+            className="btn"
+            disabled={!!busy}
+            onClick={() => importIndex("sse50", "上证50")}
+          >
+            {busy === "import-sse50" ? "导入中…" : "导入上证50"}
           </button>
-          <span className="muted">时区 {schedule?.timezone || "Asia/Shanghai"}</span>
+          <button
+            className="btn"
+            disabled={!!busy}
+            onClick={() => importIndex("csi300", "沪深300")}
+          >
+            {busy === "import-csi300" ? "导入中…" : "导入沪深300"}
+          </button>
+          <span className="muted" style={{ alignSelf: "center" }}>
+            从中证指数拉取成分股，已存在则跳过
+          </span>
         </div>
       </div>
 
@@ -340,11 +228,6 @@ export default function WatchlistPage() {
                 <th>股票</th>
                 <th>训练</th>
                 <th>预测</th>
-                <th>投票</th>
-                {ALGOS.map((a) => (
-                  <th key={a}>{a.toUpperCase()}</th>
-                ))}
-                <th>收盘</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -354,42 +237,30 @@ export default function WatchlistPage() {
                   <td>
                     <strong>{it.symbol}</strong>
                     <div className="muted">{it.name || it.exchange}</div>
-                    {it.last_error && <div className="error" style={{ fontSize: "0.8rem" }}>{it.last_error}</div>}
+                    {it.last_error && (
+                      <div className="error" style={{ fontSize: "0.8rem" }}>
+                        {it.last_error}
+                      </div>
+                    )}
                   </td>
                   <td>
-                    <span className={badgeClass(it.train_status)}>{it.train_status}</span>
+                    <Link to={`/models?symbol=${encodeURIComponent(it.symbol)}`}>
+                      <span className={badgeClass(it.train_status)}>{it.train_status}</span>
+                    </Link>
                   </td>
                   <td>
-                    <span className={badgeClass(it.predict_status)}>{it.predict_status}</span>
+                    <Link to={`/models?symbol=${encodeURIComponent(it.symbol)}`}>
+                      <span className={badgeClass(it.predict_status)}>{it.predict_status}</span>
+                    </Link>
                   </td>
                   <td>
-                    <span className={recClass(it.vote)}>{it.vote || "—"}</span>
-                  </td>
-                  {ALGOS.map((a) => (
-                    <td key={a}>
-                      <span className={recClass(it.algorithms?.[a]?.recommendation)}>
-                        {it.algorithms?.[a]?.recommendation || "—"}
-                      </span>
-                    </td>
-                  ))}
-                  <td>{it.close != null ? Number(it.close).toFixed(2) : "—"}</td>
-                  <td>
-                    <div className="btn-row">
-                      <button
-                        className="btn primary"
-                        disabled={!!busy}
-                        onClick={() => trainOne(it.symbol)}
-                      >
-                        更新模型
-                      </button>
-                      <button
-                        className="btn"
-                        disabled={!!busy}
-                        onClick={() => removeSymbol(it.symbol)}
-                      >
-                        删除
-                      </button>
-                    </div>
+                    <button
+                      className="btn"
+                      disabled={!!busy}
+                      onClick={() => removeSymbol(it.symbol)}
+                    >
+                      删除
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -398,16 +269,6 @@ export default function WatchlistPage() {
         </div>
         {items.length === 0 && <p className="muted">列表为空，先添加股票</p>}
       </div>
-
-      {logs.length > 0 && (
-        <div className="panel" style={{ marginTop: "1rem" }}>
-          <h3 style={{ marginTop: 0 }}>Job 日志</h3>
-          <pre className="log">
-            {logs.join("\n")}
-            <div ref={logEndRef} />
-          </pre>
-        </div>
-      )}
     </div>
   );
 }

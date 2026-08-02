@@ -40,15 +40,19 @@ DATABASE_URL=postgresql+psycopg://itb:itb@localhost:5432/itb \
 flowchart TD
   WL[Watchlist] --> Train[更新模型 train_update]
   WL --> Pred[一键预测 daily_predict]
-  Sched[APScheduler cron] --> Pred
-  Train --> DL1[download merge features labels]
+  Sched[Prefect cron itb-daily-predict] --> Pred
+  Train --> Pref[Prefect queue itb-kedro-job]
+  Pred --> Pref
+  Pref --> DL1[download merge features labels]
   DL1 --> TR[train all algos]
   TR --> PR1[predict signals]
-  Pred --> DL2[download merge features labels]
+  Pref --> DL2[download merge features labels]
   DL2 --> PR2[predict signals skip train]
   PR1 --> Vote[per-algo + majority vote]
   PR2 --> Vote
 ```
+
+Jobs are enqueued through Prefect (`docs/prefect.md`); each Kedro node runs as a Prefect task (fine-grained DAG).
 
 | Kind | Steps | Trigger |
 |------|--------|---------|

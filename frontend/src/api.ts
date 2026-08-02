@@ -1,10 +1,22 @@
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const user = import.meta.env.VITE_ITB_USER as string | undefined;
+  const teams = import.meta.env.VITE_ITB_TEAMS as string | undefined;
+  const admin = import.meta.env.VITE_ITB_ADMIN as string | undefined;
+  if (user) headers["X-ITB-User"] = user;
+  if (teams) headers["X-ITB-Teams"] = teams;
+  if (admin) headers["X-ITB-Admin"] = admin;
+  return headers;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...authHeaders(),
       ...(init?.headers || {}),
     },
   });
@@ -23,9 +35,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export type JobRef = {
+  job_id: string;
+  status?: string;
+  steps?: string[];
+  team?: string;
+  prefect_flow_run_id?: string | null;
+  prefect_ui_url?: string | null;
+};
+
 export const api = {
   dashboard: () => request<any>("/api/dashboard"),
   health: () => request<any>("/health"),
+  prefectInfo: () =>
+    request<{
+      api_url: string | null;
+      ui_url: string;
+      redis_mirror: boolean;
+      job_source: string;
+      rbac_enabled: boolean;
+    }>("/api/prefect/info"),
   getConfig: () => request<{ path: string; content: string; parsed: any }>("/api/config"),
   putConfig: (content: string) =>
     request("/api/config", { method: "PUT", body: JSON.stringify({ content }) }),
@@ -36,17 +65,61 @@ export const api = {
     ),
   watchlistAdd: (symbol: string) =>
     request<any>("/api/watchlist", { method: "POST", body: JSON.stringify({ symbol }) }),
+  watchlistImport: (index: "sse50" | "csi300") =>
+    request<{
+      index: string;
+      index_name: string;
+      total: number;
+      added: number;
+      skipped: number;
+      items: any[];
+      skipped_items: { symbol: string; reason: string }[];
+    }>("/api/watchlist/import", { method: "POST", body: JSON.stringify({ index }) }),
   watchlistDelete: (symbol: string) =>
     request(`/api/watchlist/${encodeURIComponent(symbol)}`, { method: "DELETE" }),
-  watchlistTrain: (symbol: string) =>
-    request<{ job_id: string; symbol: string; steps: string[] }>(
-      `/api/watchlist/${encodeURIComponent(symbol)}/train`,
+  watchlistTrain: (symbol: string, team?: string) => {
+    const q = team ? `?team=${encodeURIComponent(team)}` : "";
+    return request<JobRef & { symbol: string; steps: string[] }>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/train${q}`,
       { method: "POST" },
-    ),
-  watchlistPredict: (symbols?: string[]) =>
-    request<{ batch_id: number; jobs: any[]; skipped: any[] }>("/api/watchlist/predict", {
+    );
+  },
+  watchlistTrainAll: (symbols?: string[], team?: string) =>
+    request<{
+      batch_id: number | null;
+      status: string;
+      total: number;
+      queued: number;
+      running: number;
+      completed: number;
+      failed: number;
+      skipped: number;
+      current_symbol: string;
+      resumed?: boolean;
+      deduped?: boolean;
+      steps: string[];
+    }>("/api/watchlist/train", {
       method: "POST",
-      body: JSON.stringify({ symbols: symbols ?? null }),
+      body: JSON.stringify({ symbols: symbols ?? null, team: team ?? null }),
+    }),
+  watchlistTrainActive: () =>
+    request<{
+      batch: {
+        batch_id: number;
+        status: string;
+        total: number;
+        queued: number;
+        running: number;
+        completed: number;
+        failed: number;
+        skipped: number;
+        current_symbol: string;
+      } | null;
+    }>("/api/watchlist/train/active"),
+  watchlistPredict: (symbols?: string[], team?: string) =>
+    request<{ batch_id: number; jobs: JobRef[]; skipped: any[] }>("/api/watchlist/predict", {
+      method: "POST",
+      body: JSON.stringify({ symbols: symbols ?? null, team: team ?? null }),
     }),
   watchlistSignals: (symbol: string) =>
     request<any>(`/api/watchlist/${encodeURIComponent(symbol)}/signals`),
@@ -64,13 +137,13 @@ export const api = {
       backtest: string[];
       all: string[];
     }>("/api/pipeline/steps"),
-  createJob: (steps: string[], config_overrides?: Record<string, unknown>) =>
-    request<{ job_id: string; status: string; steps: string[] }>("/api/pipeline/jobs", {
+  createJob: (steps: string[], config_overrides?: Record<string, unknown>, team?: string) =>
+    request<JobRef>("/api/pipeline/jobs", {
       method: "POST",
-      body: JSON.stringify({ steps, config_overrides }),
+      body: JSON.stringify({ steps, config_overrides, team }),
     }),
-  listJobs: () => request<{ jobs: any[] }>("/api/pipeline/jobs"),
-  getJob: (id: string) => request<any>(`/api/pipeline/jobs/${id}`),
+  listJobs: () => request<{ jobs: JobRef[]; source?: string }>("/api/pipeline/jobs"),
+  getJob: (id: string) => request<JobRef & Record<string, any>>(`/api/pipeline/jobs/${id}`),
   models: (symbol?: string) => {
     const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : "";
     return request<any>(`/api/models${q}`);

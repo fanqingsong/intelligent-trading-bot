@@ -25,3 +25,15 @@ class MarketFrame(Base):
     kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class AshareStock(Base):
+    """Cached A-share code/name row for Watchlist suggest (沪深)."""
+
+    __tablename__ = "ashare_stocks"
+
+    code: Mapped[str] = mapped_column(String(6), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    name_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(8), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

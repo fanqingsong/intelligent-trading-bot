@@ -1,6 +1,7 @@
 """Watchlist orchestration: CRUD, train/predict jobs, signal summaries."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -25,6 +26,12 @@ from backend.db.models import BatchRun, SymbolRunLink, WatchlistItem
 PIPELINE_URL = os.environ.get("PIPELINE_URL", "http://localhost:8001")
 ASHARE_TEMPLATE = PACKAGE_ROOT / "configs" / "config-ashare-1d.jsonc"
 ALGOS = ("svc", "gb", "nn", "lc")
+_TERMINAL_LINK = frozenset({"completed", "failed", "skipped"})
+_TRAIN_BATCH_POLL_S = float(os.environ.get("ITB_TRAIN_BATCH_POLL_S", "5"))
+
+# In-process processors for durable train-all batches (checkpointed in Postgres).
+_train_batch_tasks: dict[int, asyncio.Task] = {}
+_train_batch_teams: dict[int, str | None] = {}
 
 
 def _utcnow() -> datetime:
@@ -121,12 +128,64 @@ def delete_item(symbol: str) -> bool:
         return True
 
 
-async def _enqueue_job(steps: list[str], overrides: dict[str, Any]) -> dict[str, Any]:
-    payload = {
+def import_index(index: str) -> dict[str, Any]:
+    """Bulk-add index constituents to the watchlist (idempotent)."""
+    from shared.collectors.collector_ashare import (
+        ashare_exchange,
+        fetch_index_constituents,
+        resolve_index_preset,
+    )
+
+    preset = resolve_index_preset(index)
+    constituents = fetch_index_constituents(index)
+
+    added: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        for row in constituents:
+            code = row["code"]
+            existing = session.get(WatchlistItem, code)
+            if existing:
+                skipped.append({"symbol": code, "reason": "exists"})
+                continue
+            item = WatchlistItem(
+                symbol=code,
+                name=row.get("name") or "",
+                exchange=row.get("exchange") or ashare_exchange(code),
+                train_status="untrained",
+                predict_status="idle",
+            )
+            session.add(item)
+            session.flush()
+            added.append(_item_dict(item))
+        session.commit()
+
+    return {
+        "index": preset["code"],
+        "index_name": preset["name"],
+        "total": len(constituents),
+        "added": len(added),
+        "skipped": len(skipped),
+        "items": added,
+        "skipped_items": skipped,
+    }
+
+
+async def _enqueue_job(
+    steps: list[str],
+    overrides: dict[str, Any],
+    *,
+    team: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "steps": steps,
         "config_path": template_config_path(),
         "config_overrides": overrides,
     }
+    if team:
+        payload["team"] = team
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(f"{PIPELINE_URL}/internal/jobs", json=payload)
     if resp.status_code >= 400:
@@ -134,12 +193,22 @@ async def _enqueue_job(steps: list[str], overrides: dict[str, Any]) -> dict[str,
     return resp.json()
 
 
-async def train_symbol(symbol: str) -> dict[str, Any]:
+async def train_symbol(symbol: str, *, team: str | None = None) -> dict[str, Any]:
     SessionLocal = get_session_factory()
     with SessionLocal() as session:
         item = session.get(WatchlistItem, symbol)
         if not item:
             raise KeyError(symbol)
+        # Same-symbol mutex at control-plane level (Prefect also enforces itb-symbol:*).
+        if item.train_status in ("queued", "running") and item.last_train_job_id:
+            return {
+                "symbol": symbol,
+                "job_id": item.last_train_job_id,
+                "steps": list(TRAIN_UPDATE_STEPS),
+                "kind": "train",
+                "deduped": True,
+                "status": item.train_status,
+            }
         item.train_status = "queued"
         item.predict_status = "idle"
         item.last_error = ""
@@ -147,7 +216,7 @@ async def train_symbol(symbol: str) -> dict[str, Any]:
 
     overrides = build_overrides(symbol, train=True)
     try:
-        job = await _enqueue_job(list(TRAIN_UPDATE_STEPS), overrides)
+        job = await _enqueue_job(list(TRAIN_UPDATE_STEPS), overrides, team=team)
     except Exception as e:
         with SessionLocal() as session:
             item = session.get(WatchlistItem, symbol)
@@ -163,7 +232,290 @@ async def train_symbol(symbol: str) -> dict[str, Any]:
             item.train_status = "running"
             item.last_train_job_id = job.get("job_id", "")
             session.commit()
-    return {"symbol": symbol, "job_id": job.get("job_id"), "steps": job.get("steps"), "kind": "train"}
+    return {
+        "symbol": symbol,
+        "job_id": job.get("job_id"),
+        "steps": job.get("steps"),
+        "kind": "train",
+        "team": job.get("team") or team,
+    }
+
+
+def _batch_progress(session, batch_id: int) -> dict[str, Any]:
+    batch = session.get(BatchRun, batch_id)
+    links = list(
+        session.scalars(
+            select(SymbolRunLink)
+            .where(SymbolRunLink.batch_id == batch_id)
+            .order_by(SymbolRunLink.id.asc())
+        ).all()
+    )
+    counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0, "skipped": 0}
+    current_symbol = ""
+    for link in links:
+        counts[link.status] = counts.get(link.status, 0) + 1
+        if not current_symbol and link.status in ("queued", "running"):
+            current_symbol = link.symbol
+    return {
+        "batch_id": batch_id,
+        "kind": batch.kind if batch else "train",
+        "status": batch.status if batch else "unknown",
+        "note": batch.note if batch else "",
+        "total": len(links),
+        "current_symbol": current_symbol,
+        **counts,
+        "steps": list(TRAIN_UPDATE_STEPS),
+    }
+
+
+def find_open_train_batch_id() -> int | None:
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        batch = session.scalars(
+            select(BatchRun)
+            .where(BatchRun.kind == "train", BatchRun.status.in_(("queued", "running")))
+            .order_by(BatchRun.id.desc())
+        ).first()
+        return batch.id if batch else None
+
+
+def active_train_batch() -> dict[str, Any] | None:
+    batch_id = find_open_train_batch_id()
+    if batch_id is None:
+        return None
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        return _batch_progress(session, batch_id)
+
+
+def _ensure_train_batch_processor(batch_id: int, *, team: str | None = None) -> None:
+    if team is not None or batch_id not in _train_batch_teams:
+        _train_batch_teams[batch_id] = team
+    task = _train_batch_tasks.get(batch_id)
+    if task is not None and not task.done():
+        return
+    _train_batch_tasks[batch_id] = asyncio.create_task(
+        _process_train_batch(batch_id, team=_train_batch_teams.get(batch_id)),
+        name=f"train-batch-{batch_id}",
+    )
+
+
+async def resume_open_train_batches() -> list[int]:
+    """Re-attach processors for unfinished train-all batches (crash recovery)."""
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        rows = list(
+            session.scalars(
+                select(BatchRun).where(
+                    BatchRun.kind == "train",
+                    BatchRun.status.in_(("queued", "running")),
+                )
+            ).all()
+        )
+        batch_ids = [b.id for b in rows]
+    for batch_id in batch_ids:
+        _ensure_train_batch_processor(batch_id)
+    return batch_ids
+
+
+async def train_symbols(
+    symbols: list[str] | None = None,
+    note: str = "manual",
+    *,
+    team: str | None = None,
+) -> dict[str, Any]:
+    """Train all (or selected) watchlist symbols sequentially with checkpoint resume.
+
+    Progress is persisted in ``batch_runs`` / ``symbol_run_links``. On API restart,
+    ``resume_open_train_batches`` continues from the first unfinished symbol.
+    """
+    open_id = find_open_train_batch_id()
+    if open_id is not None:
+        _ensure_train_batch_processor(open_id, team=team)
+        SessionLocal = get_session_factory()
+        with SessionLocal() as session:
+            progress = _batch_progress(session, open_id)
+        progress["resumed"] = True
+        progress["deduped"] = True
+        return progress
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        if symbols:
+            items = [session.get(WatchlistItem, s) for s in symbols]
+            items = [i for i in items if i is not None]
+        else:
+            items = list(
+                session.scalars(select(WatchlistItem).order_by(WatchlistItem.created_at.asc())).all()
+            )
+        if not items:
+            return {
+                "batch_id": None,
+                "status": "completed",
+                "total": 0,
+                "queued": 0,
+                "running": 0,
+                "completed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "current_symbol": "",
+                "resumed": False,
+                "steps": list(TRAIN_UPDATE_STEPS),
+            }
+
+        batch = BatchRun(kind="train", status="running", note=note)
+        session.add(batch)
+        session.flush()
+        for item in items:
+            session.add(
+                SymbolRunLink(
+                    batch_id=batch.id,
+                    symbol=item.symbol,
+                    status="queued",
+                )
+            )
+            item.train_status = "queued"
+            item.predict_status = "idle"
+            item.last_error = ""
+        session.commit()
+        batch_id = batch.id
+        progress = _batch_progress(session, batch_id)
+
+    _ensure_train_batch_processor(batch_id, team=team)
+    progress["resumed"] = False
+    progress["deduped"] = False
+    return progress
+
+
+async def _fetch_job(job_id: str) -> dict[str, Any] | None:
+    if not job_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{job_id}")
+        if resp.status_code == 404:
+            return None
+        if resp.status_code >= 400:
+            return None
+        return resp.json()
+    except Exception:
+        return None
+
+
+async def _process_train_batch(batch_id: int, *, team: str | None = None) -> None:
+    """Walk SymbolRunLinks in order: enqueue one, wait until terminal, then next."""
+    SessionLocal = get_session_factory()
+    try:
+        while True:
+            with SessionLocal() as session:
+                batch = session.get(BatchRun, batch_id)
+                if not batch or batch.status not in ("queued", "running"):
+                    return
+                if batch.status == "queued":
+                    batch.status = "running"
+                    session.commit()
+                link = session.scalars(
+                    select(SymbolRunLink)
+                    .where(
+                        SymbolRunLink.batch_id == batch_id,
+                        SymbolRunLink.status.in_(("queued", "running")),
+                    )
+                    .order_by(SymbolRunLink.id.asc())
+                ).first()
+                if link is None:
+                    _maybe_finish_batch(session, batch_id)
+                    session.commit()
+                    return
+                link_id = link.id
+                symbol = link.symbol
+                job_id = link.job_id or ""
+                link_status = link.status
+
+            if link_status == "queued" and not job_id:
+                overrides = build_overrides(symbol, train=True)
+                try:
+                    job = await _enqueue_job(list(TRAIN_UPDATE_STEPS), overrides, team=team)
+                    job_id = job.get("job_id", "")
+                except Exception as e:
+                    with SessionLocal() as session:
+                        link = session.get(SymbolRunLink, link_id)
+                        item = session.get(WatchlistItem, symbol)
+                        if link:
+                            link.status = "failed"
+                            link.error = str(e)
+                        if item:
+                            item.train_status = "failed"
+                            item.last_error = str(e)
+                        _maybe_finish_batch(session, batch_id)
+                        session.commit()
+                    continue
+
+                with SessionLocal() as session:
+                    link = session.get(SymbolRunLink, link_id)
+                    item = session.get(WatchlistItem, symbol)
+                    if link:
+                        link.job_id = job_id
+                        link.status = "running"
+                    if item:
+                        item.train_status = "running"
+                        item.last_train_job_id = job_id
+                        item.last_error = ""
+                    session.commit()
+
+            # Wait for in-flight job (or re-check after crash).
+            data = await _fetch_job(job_id) if job_id else None
+            if data is None and job_id:
+                # Job record missing after outage — re-queue this symbol.
+                with SessionLocal() as session:
+                    link = session.get(SymbolRunLink, link_id)
+                    item = session.get(WatchlistItem, symbol)
+                    if link and link.status not in _TERMINAL_LINK:
+                        link.job_id = ""
+                        link.status = "queued"
+                        link.error = "job missing after restart; re-queued"
+                    if item and item.train_status in ("queued", "running"):
+                        item.train_status = "queued"
+                        item.last_train_job_id = ""
+                    session.commit()
+                await asyncio.sleep(_TRAIN_BATCH_POLL_S)
+                continue
+
+            if data is None:
+                await asyncio.sleep(_TRAIN_BATCH_POLL_S)
+                continue
+
+            status = str(data.get("status") or "")
+            error = str(data.get("error") or "")
+            if status in ("completed", "failed"):
+                sync_job_status(symbol, job_id, "train", status, error)
+                # Ensure we advance even if sync missed the link.
+                with SessionLocal() as session:
+                    link = session.get(SymbolRunLink, link_id)
+                    if link and link.status not in _TERMINAL_LINK:
+                        link.status = status
+                        if error:
+                            link.error = error
+                        _maybe_finish_batch(session, batch_id)
+                        session.commit()
+                continue
+
+            if status in ("queued", "running", ""):
+                sync_job_status(symbol, job_id, "train", status or "running", error)
+            await asyncio.sleep(_TRAIN_BATCH_POLL_S)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        print(f"WARN: train batch {batch_id} processor failed: {e}")
+        with SessionLocal() as session:
+            batch = session.get(BatchRun, batch_id)
+            if batch and batch.status in ("queued", "running"):
+                # Leave batch open so startup resume can retry.
+                batch.note = (batch.note or "") + f"\nprocessor_error: {e}"
+                session.commit()
+    finally:
+        task = _train_batch_tasks.get(batch_id)
+        if task is asyncio.current_task():
+            _train_batch_tasks.pop(batch_id, None)
 
 
 def _is_trained(item: WatchlistItem) -> bool:
@@ -174,7 +526,12 @@ def _is_trained(item: WatchlistItem) -> bool:
     return not df.empty
 
 
-async def predict_symbols(symbols: list[str] | None = None, note: str = "manual") -> dict[str, Any]:
+async def predict_symbols(
+    symbols: list[str] | None = None,
+    note: str = "manual",
+    *,
+    team: str | None = None,
+) -> dict[str, Any]:
     SessionLocal = get_session_factory()
     with SessionLocal() as session:
         if symbols:
@@ -215,7 +572,7 @@ async def predict_symbols(symbols: list[str] | None = None, note: str = "manual"
     for symbol in planned_symbols:
         overrides = build_overrides(symbol, train=False)
         try:
-            job = await _enqueue_job(list(DAILY_PREDICT_STEPS), overrides)
+            job = await _enqueue_job(list(DAILY_PREDICT_STEPS), overrides, team=team)
             job_id = job.get("job_id", "")
             with SessionLocal() as session:
                 item = session.get(WatchlistItem, symbol)
@@ -361,6 +718,8 @@ def sync_job_status(symbol: str, job_id: str, kind: str, status: str, error: str
                 item.last_error = error or "train failed"
             elif status == "running":
                 item.train_status = "running"
+            elif status == "queued":
+                item.train_status = "queued"
         elif kind == "predict":
             if status == "completed":
                 item.predict_status = "ready"
@@ -371,12 +730,82 @@ def sync_job_status(symbol: str, job_id: str, kind: str, status: str, error: str
                 item.last_error = error or "predict failed"
             elif status == "running":
                 item.predict_status = "running"
+            elif status == "queued":
+                item.predict_status = "queued"
         if job_id:
             if kind == "train":
                 item.last_train_job_id = job_id
             else:
                 item.last_predict_job_id = job_id
+
+        if job_id and status in ("completed", "failed", "running", "queued"):
+            links = list(
+                session.scalars(select(SymbolRunLink).where(SymbolRunLink.job_id == job_id)).all()
+            )
+            for link in links:
+                link.status = status
+                if error:
+                    link.error = error
+                _maybe_finish_batch(session, link.batch_id)
         session.commit()
+
+
+def _maybe_finish_batch(session, batch_id: int | None) -> None:
+    if not batch_id:
+        return
+    batch = session.get(BatchRun, batch_id)
+    if not batch or batch.status not in ("running", "queued"):
+        return
+    links = list(session.scalars(select(SymbolRunLink).where(SymbolRunLink.batch_id == batch_id)).all())
+    if not links:
+        return
+    terminal = {"completed", "failed", "skipped"}
+    if not all(link.status in terminal for link in links):
+        return
+    batch.status = "completed" if any(link.status == "completed" for link in links) else "failed"
+    if all(link.status == "failed" for link in links):
+        batch.status = "failed"
+    elif all(link.status in ("completed", "skipped") for link in links):
+        batch.status = "completed"
+    else:
+        batch.status = "completed"
+    batch.finished_at = _utcnow()
+
+
+def _parse_job_steps(raw: Any) -> list[str]:
+    if isinstance(raw, list):
+        return [str(s) for s in raw]
+    if isinstance(raw, str) and raw.strip():
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return [str(s) for s in data]
+        except Exception:
+            pass
+    return []
+
+
+def _job_progress_payload(kind: str, job: dict[str, Any]) -> dict[str, Any]:
+    steps = _parse_job_steps(job.get("steps"))
+    current = str(job.get("current_step") or "").strip()
+    try:
+        progress = int(float(job.get("progress") or 0))
+    except Exception:
+        progress = 0
+    progress = max(0, min(100, progress))
+    step_index = steps.index(current) + 1 if current and current in steps else 0
+    return {
+        "kind": kind,
+        "job_id": job.get("job_id") or "",
+        "status": str(job.get("status") or ""),
+        "current_step": current,
+        "progress": progress,
+        "steps": steps,
+        "step_index": step_index,
+        "step_total": len(steps),
+        "prefect_ui_url": job.get("prefect_ui_url") or None,
+        "error": str(job.get("error") or ""),
+    }
 
 
 async def refresh_running_statuses() -> None:
@@ -388,6 +817,18 @@ async def refresh_running_statuses() -> None:
             (i.symbol, i.train_status, i.last_train_job_id, i.predict_status, i.last_predict_job_id)
             for i in items
         ]
+        open_links = list(
+            session.scalars(
+                select(SymbolRunLink).where(SymbolRunLink.status.in_(("queued", "running")))
+            ).all()
+        )
+        link_snapshot: list[tuple[str, str, str]] = []
+        for link in open_links:
+            if not link.job_id:
+                continue
+            batch = session.get(BatchRun, link.batch_id)
+            kind = batch.kind if batch and batch.kind in ("train", "predict") else "predict"
+            link_snapshot.append((link.symbol, link.job_id, kind))
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         for symbol, train_status, train_job, predict_status, predict_job in snapshot:
@@ -404,6 +845,59 @@ async def refresh_running_statuses() -> None:
                     resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{predict_job}")
                     if resp.status_code == 200:
                         data = resp.json()
-                        sync_job_status(symbol, predict_job, "predict", data.get("status", ""), data.get("error", ""))
+                        sync_job_status(
+                            symbol, predict_job, "predict", data.get("status", ""), data.get("error", "")
+                        )
                 except Exception:
                     pass
+        for symbol, job_id, kind in link_snapshot:
+            try:
+                resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{job_id}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    sync_job_status(symbol, job_id, kind, data.get("status", ""), data.get("error", ""))
+            except Exception:
+                pass
+
+    # Keep durable train-all processors alive across task death / process restart.
+    try:
+        await resume_open_train_batches()
+    except Exception:
+        pass
+
+
+async def enrich_items_with_job_progress(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach live Redis/pipeline progress for queued/running train & predict jobs."""
+    need: list[tuple[int, str, str]] = []  # (index, kind, job_id)
+    for idx, item in enumerate(items):
+        if item.get("train_status") in ("running", "queued") and item.get("last_train_job_id"):
+            need.append((idx, "train", item["last_train_job_id"]))
+        if item.get("predict_status") in ("running", "queued") and item.get("last_predict_job_id"):
+            need.append((idx, "predict", item["last_predict_job_id"]))
+
+    if not need:
+        return items
+
+    out = [dict(item) for item in items]
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for idx, kind, job_id in need:
+            try:
+                resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{job_id}")
+                if resp.status_code != 200:
+                    continue
+                payload = _job_progress_payload(kind, resp.json())
+                if kind == "train":
+                    out[idx]["train_job"] = payload
+                    # Convenience alias for the active train UI.
+                    if out[idx].get("train_status") in ("running", "queued"):
+                        out[idx]["job_progress"] = payload
+                else:
+                    out[idx]["predict_job"] = payload
+                    if (
+                        out[idx].get("predict_status") in ("running", "queued")
+                        and out[idx].get("train_status") not in ("running", "queued")
+                    ):
+                        out[idx]["job_progress"] = payload
+            except Exception:
+                continue
+    return out

@@ -50,7 +50,7 @@ Stop with `bin/stop_dev.sh`.
 | **Config** | Edit / save active JSONC; load sample configs |
 | **Pipeline** | Run any subset of offline steps with live logs |
 | **Data** | Browse Postgres frames (`klines` / `data` / `features` / …) |
-| **Models** | Local staging artifacts + MLflow prefix |
+| **Models** | Train one / train-all (checkpoint resume) · MLflow · staging files |
 | **Backtest** | `predict_rolling` + `simulate` |
 | **Signals** | Recent signal rows from Postgres |
 
@@ -60,7 +60,7 @@ Stop with `bin/stop_dev.sh`.
 |--------|------|
 | `frontend/` | React UI |
 | `backend/` | FastAPI BFF / control plane + APScheduler + watchlist ORM |
-| `kedro_pipeline/` | Pipeline worker, Kedro nodes, modular ML packages (`features`, `labels`, `classifiers`, …) |
+| `kedro_pipeline/` | Pipeline worker, Kedro nodes, Prefect flow wrapper, modular ML packages |
 | `conf/` | Kedro DataCatalog / parameters |
 | `shared/` | Cross-service contract: config helpers, collectors, market frames |
 | `scripts/migrate_csv_to_postgres.py` | One-shot CSV → Postgres migration |
@@ -71,21 +71,27 @@ Stop with `bin/stop_dev.sh`.
 | Service | Port | Role |
 |---------|------|------|
 | frontend | 5174 | React UI |
-| backend | 8000 | BFF / schedule / watchlist API |
-| pipeline | 8001 | Kedro offline pipeline worker |
+| backend | 8000 | BFF / schedule sync / watchlist API |
+| pipeline | 8001 | Job enqueue API (HTTP → Prefect) |
+| prefect-server | 4200 | Prefect UI + durable queue |
+| prefect-worker | — | Serves Kedro jobs + daily-predict cron |
 | mlflow | 5000 | Model Registry + tracking UI |
 | viz | 4141 | Kedro-Viz pipeline DAG UI |
-| redis | 6379 | Job state and logs |
+| redis | 6379 | Job state/logs mirror for SSE UI |
 | postgres | 5432 | Watchlist + market_frames |
+
+Orchestration split: **Prefect** queues/schedules/concurrency/recovery + per-node task DAG; **Kedro** owns node logic/catalog. UI deep-links Prefect runs; job lists are hybrid Redis+Prefect. Optional BFF team RBAC via `X-ITB-*` headers. See [docs/prefect.md](docs/prefect.md).
 
 Job presets:
 
 | Kind | Steps | Trigger |
 |------|--------|---------|
-| `train_update` | download→…→train→predict→signals | Watchlist「更新模型」 |
+| `train_update` | download→…→train→predict→signals | 「更新模型」/ 「更新全部模型」 |
 | `daily_predict` | download→…→predict→signals (no train) | 「一键预测」/ 盘后定时 |
 
-More docs: [docs/ashare.md](docs/ashare.md), [docs/scripts.md](docs/scripts.md), [docs/configuration.md](docs/configuration.md), [docs/data-inputs.md](docs/data-inputs.md).
+Train-all is sequential and checkpointed in Postgres (`batch_runs` / `symbol_run_links`); see [docs/train-all.md](docs/train-all.md).
+
+More docs: [docs/ashare.md](docs/ashare.md), [docs/scripts.md](docs/scripts.md), [docs/configuration.md](docs/configuration.md), [docs/data-inputs.md](docs/data-inputs.md), [docs/prefect.md](docs/prefect.md), [docs/train-all.md](docs/train-all.md).
 
 ## Notes
 

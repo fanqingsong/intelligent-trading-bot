@@ -27,6 +27,7 @@ import itertools
 import logging
 import math
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import mlflow
@@ -39,9 +40,41 @@ log = logging.getLogger("model_store")
 
 label_algo_separator = "_"
 
+_autolog_enabled = False
+
 
 def _default_tracking_uri() -> str:
     return os.environ.get("MLFLOW_TRACKING_URI") or "http://localhost:5000"
+
+
+def enable_autolog() -> None:
+    """Enable sklearn / lightgbm / tensorflow autolog into the active run.
+
+    ``log_models=False`` so we keep registering our custom ``PairPythonModel``
+    pyfunc only (no duplicate native-flavor artifacts).
+    """
+    global _autolog_enabled
+    if _autolog_enabled:
+        return
+    mlflow.sklearn.autolog(log_models=False, silent=True)
+    mlflow.lightgbm.autolog(log_models=False, silent=True)
+    try:
+        mlflow.tensorflow.autolog(log_models=False, silent=True)
+    except Exception as exc:  # tensorflow/keras may be unavailable
+        log.debug("Skipping tensorflow autolog: %s", exc)
+    _autolog_enabled = True
+
+
+def disable_autolog() -> None:
+    """Turn off framework autologging (used by tests to avoid stray runs)."""
+    global _autolog_enabled
+    mlflow.sklearn.autolog(disable=True)
+    mlflow.lightgbm.autolog(disable=True)
+    try:
+        mlflow.tensorflow.autolog(disable=True)
+    except Exception:
+        pass
+    _autolog_enabled = False
 
 
 def _flatten_params(d: dict, prefix: str = "") -> dict:
@@ -190,6 +223,7 @@ class ModelStore:
         params: dict | None = None,
         sample_X=None,
         algo: dict | None = None,
+        into_active_run: bool = False,
     ) -> PairPythonModel:
         """Wrap & persist a ``(model, scaler)`` pair as a new MLflow model version.
 
@@ -201,6 +235,9 @@ class ModelStore:
         * algo        — the algorithm config dict (``{name, algo, params, train}``);
                         used to set ``algo_type``/``params`` on the wrapper and to
                         derive default params. Falls back to parsing *column_name*.
+        * into_active_run — when True, log into the current active run (no new
+                        ``start_run``). Use with :meth:`training_run` so autolog
+                        from ``fit``/``train`` lands in the same run as the pyfunc.
         """
         algo_name, algo_type, algo_params = self._resolve_algo(column_name, algo)
         pm = PairPythonModel(
@@ -217,9 +254,36 @@ class ModelStore:
             metrics=metrics,
             params=self._default_params(column_name, algo_name, algo, params),
             sample_X=sample_X,
+            into_active_run=into_active_run,
         )
         self.model_pairs[column_name] = pm
         return pm
+
+    @contextmanager
+    def training_run(self, column_name: str, *, tags: dict | None = None):
+        """Start an MLflow run for train + register of one label×algo pair.
+
+        Call :meth:`put_model_pair` with ``into_active_run=True`` inside the
+        block so framework autolog and our pyfunc share one run.
+        """
+        enable_autolog()
+        label, algo = score_to_label_algo_pair(column_name)
+        reg_name = self._reg_name(column_name)
+        self._ensure_experiment()
+        self._ensure_registered(reg_name)
+
+        run_tags = {
+            "symbol": self.symbol,
+            "label": label,
+            "algo": algo,
+            "column": column_name,
+        }
+        if tags:
+            run_tags.update({k: str(v) for k, v in tags.items()})
+
+        nested = mlflow.active_run() is not None
+        with mlflow.start_run(run_name=reg_name, tags=run_tags, nested=nested):
+            yield
 
     # ------------------------------------------------------------------ #
     # Algorithm resolution
@@ -256,17 +320,37 @@ class ModelStore:
     def _reg_name(self, column_name: str) -> str:
         return f"{self.registry_prefix}{column_name}"
 
-    def _ensure_experiment(self):
-        """Create the named experiment if needed and activate it.
+    @staticmethod
+    def _is_already_exists(exc: BaseException) -> bool:
+        msg = str(exc)
+        return "RESOURCE_ALREADY_EXISTS" in msg or "already exists" in msg.lower()
 
-        ``create_experiment`` alone does not change the active experiment —
-        without ``set_experiment``, subsequent ``start_run`` / ``log_*`` calls
-        land in Default while Model Registry still fills (registry is global).
+    def _ensure_experiment(self):
+        """Activate the named experiment, creating or restoring it if needed.
+
+        ``set_experiment`` creates when absent, but refuses a soft-deleted name
+        (``Cannot set a deleted experiment``). Restore that experiment first so
+        retrain after UI/manual delete keeps working.
+        Parallel label×algo workers may race on first create — treat
+        ``RESOURCE_ALREADY_EXISTS`` as success and retry the set.
         """
-        exp = mlflow.get_experiment_by_name(self.experiment_name)
-        if exp is None:
-            mlflow.create_experiment(self.experiment_name)
-        mlflow.set_experiment(self.experiment_name)
+        exp = self._client.get_experiment_by_name(self.experiment_name)
+        if exp is not None and getattr(exp, "lifecycle_stage", None) == "deleted":
+            self._client.restore_experiment(exp.experiment_id)
+        try:
+            mlflow.set_experiment(self.experiment_name)
+        except MlflowException as exc:
+            msg = str(exc)
+            if "deleted experiment" in msg.lower():
+                exp = self._client.get_experiment_by_name(self.experiment_name)
+                if exp is None:
+                    raise
+                self._client.restore_experiment(exp.experiment_id)
+                mlflow.set_experiment(self.experiment_name)
+                return
+            if not self._is_already_exists(exc):
+                raise
+            mlflow.set_experiment(self.experiment_name)
 
     def _ensure_registered(self, name: str):
         try:
@@ -286,6 +370,7 @@ class ModelStore:
         metrics: dict | None,
         params: dict | None,
         sample_X,
+        into_active_run: bool = False,
     ):
         label, algo = score_to_label_algo_pair(column_name)
         reg_name = self._reg_name(column_name)
@@ -314,31 +399,76 @@ class ModelStore:
             except Exception as exc:  # signature is best-effort; never block training
                 log.warning("Could not infer MLflow signature for '%s': %s", column_name, exc)
 
-        nested = mlflow.active_run() is not None
-        with mlflow.start_run(run_name=reg_name, tags=run_tags, nested=nested) as run:
-            if params:
-                mlflow.log_params(_flatten_params(params))
-            if metrics:
-                self._log_metrics(metrics)
-
-            # MLflow 3+: use ``name`` (not deprecated ``artifact_path``) so the
-            # experiment Models tab gets a first-class LoggedModel entry.
-            # ``registered_model_name`` still publishes to the Model Registry.
-            mlflow.pyfunc.log_model(
-                python_model=pm,
-                name="model",
-                registered_model_name=reg_name,
+        if into_active_run:
+            if mlflow.active_run() is None:
+                raise RuntimeError(
+                    "put_model_pair(into_active_run=True) requires an active MLflow run "
+                    "(use ModelStore.training_run)."
+                )
+            self._write_pair_to_active_run(
+                reg_name=reg_name,
+                pm=pm,
+                run_tags=run_tags,
+                metrics=metrics,
+                params=params,
                 signature=signature,
                 input_example=input_example,
             )
-            # pyfunc.log_model auto-creates a version but does not propagate run
-            # tags to the model-version tags — set them explicitly so the
-            # Registry UI / API surfaces symbol/label/algo/rolling_step/...
-            latest = self._latest_version(reg_name)
-            if latest is not None:
-                for k, v in run_tags.items():
-                    self._client.set_model_version_tag(reg_name, latest.version, k, v)
-                self._promote_to_alias(reg_name, latest.version)
+            return
+
+        nested = mlflow.active_run() is not None
+        with mlflow.start_run(run_name=reg_name, tags=run_tags, nested=nested):
+            self._write_pair_to_active_run(
+                reg_name=reg_name,
+                pm=pm,
+                run_tags=run_tags,
+                metrics=metrics,
+                params=params,
+                signature=signature,
+                input_example=input_example,
+            )
+
+    def _write_pair_to_active_run(
+        self,
+        *,
+        reg_name: str,
+        pm: PairPythonModel,
+        run_tags: dict,
+        metrics: dict | None,
+        params: dict | None,
+        signature,
+        input_example,
+    ):
+        if params:
+            flat = _flatten_params(params)
+            # Autolog may already have written estimator hyperparams into this run.
+            active = mlflow.active_run()
+            if active is not None:
+                existing = set(self._client.get_run(active.info.run_id).data.params)
+                flat = {k: v for k, v in flat.items() if k not in existing}
+            if flat:
+                mlflow.log_params(flat)
+        if metrics:
+            self._log_metrics(metrics)
+
+        # MLflow 3+: use ``name`` (not deprecated ``artifact_path``) so the
+        # experiment Models tab gets a first-class LoggedModel entry.
+        # ``registered_model_name`` still publishes to the Model Registry.
+        mlflow.pyfunc.log_model(
+            python_model=pm,
+            name="model",
+            registered_model_name=reg_name,
+            signature=signature,
+            input_example=input_example,
+        )
+        # pyfunc.log_model auto-creates a version but does not propagate run
+        # tags to the model-version tags — set them explicitly so the
+        # Registry UI / API surfaces symbol/label/algo/rolling_step/...
+        latest = self._latest_version(reg_name)
+        if latest is not None:
+            for k, v in run_tags.items():
+                self._client.set_model_version_tag(reg_name, latest.version, k, v)
+            self._promote_to_alias(reg_name, latest.version)
 
     def _log_metrics(self, metrics: dict):
         clean = {}

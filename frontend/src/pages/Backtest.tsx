@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import PrefectLink from "../components/PrefectLink";
 
 export default function BacktestPage() {
   const [steps, setSteps] = useState<string[]>(["predict_rolling", "simulate"]);
@@ -8,6 +9,7 @@ export default function BacktestPage() {
     simulate: true,
   });
   const [jobId, setJobId] = useState<string | null>(null);
+  const [prefectUrl, setPrefectUrl] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState("");
@@ -37,7 +39,8 @@ export default function BacktestPage() {
     try {
       const res = await api.createJob(chosen);
       setJobId(res.job_id);
-      setStatus(res.status);
+      setPrefectUrl(res.prefect_ui_url || null);
+      setStatus(res.status || "queued");
       setLogs([]);
       esRef.current?.close();
       const es = new EventSource(api.logsUrl(res.job_id));
@@ -93,7 +96,8 @@ export default function BacktestPage() {
         </button>
         {jobId && (
           <span className="muted">
-            Job <code>{jobId.slice(0, 8)}</code> · {status}
+            Job <code>{jobId.slice(0, 8)}</code> · {status}{" "}
+            <PrefectLink url={prefectUrl} />
           </span>
         )}
       </div>

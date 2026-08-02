@@ -5,6 +5,7 @@ import math
 from datetime import date, datetime, timezone
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -56,6 +57,10 @@ def _to_jsonable(value: Any) -> Any:
         return ts.isoformat()
     if isinstance(value, date) and not isinstance(value, datetime):
         return datetime(value.year, value.month, value.day, tzinfo=timezone.utc).isoformat()
+    if isinstance(value, (np.floating, np.integer, np.bool_)):
+        if isinstance(value, np.floating) and (np.isnan(value) or np.isinf(value)):
+            return None
+        return value.item()
     if hasattr(value, "item"):
         try:
             return _to_jsonable(value.item())
@@ -77,6 +82,34 @@ def _normalize_ts(value: Any) -> datetime:
     else:
         ts = ts.tz_convert("UTC")
     return ts.to_pydatetime()
+
+
+def _df_to_records(
+    df: pd.DataFrame,
+    *,
+    symbol: str,
+    kind: str,
+    time_column: str,
+) -> list[dict[str, Any]]:
+    """Vectorised DataFrame → market_frames row dicts (no ``iterrows``)."""
+    work = df.copy()
+    work[time_column] = pd.to_datetime(work[time_column], errors="coerce", utc=True)
+    work = work.dropna(subset=[time_column]).sort_values(by=time_column)
+    work = work.drop_duplicates(subset=[time_column], keep="last")
+    if work.empty:
+        return []
+
+    ts_values = [_normalize_ts(v) for v in work[time_column].tolist()]
+    payload_df = work.drop(columns=[time_column])
+    # NaN/Inf → None for JSONB; keep other dtypes for _to_jsonable.
+    payload_df = payload_df.astype(object).where(pd.notnull(payload_df), None)
+    raw_payloads = payload_df.to_dict(orient="records")
+
+    records: list[dict[str, Any]] = []
+    for ts, payload in zip(ts_values, raw_payloads):
+        clean = {str(k): _to_jsonable(v) for k, v in payload.items()}
+        records.append({"symbol": symbol, "kind": kind, "ts": ts, "payload": clean})
+    return records
 
 
 def load_frame(symbol: str, kind: str, time_column: str = "timestamp") -> pd.DataFrame:
@@ -112,9 +145,14 @@ def save_frame(
     kind: str,
     df: pd.DataFrame,
     time_column: str = "timestamp",
-    replace: bool = True,
+    replace: bool = False,
 ) -> int:
-    """Upsert DataFrame rows into market_frames. Returns number of rows written."""
+    """Upsert DataFrame rows into market_frames. Returns number of rows written.
+
+    Default is incremental upsert (no full-table DELETE). Pass ``replace=True``
+    only when the caller intentionally wants to wipe the symbol+kind first
+    (e.g. klines download after a full rebuild).
+    """
     kind = normalize_kind(kind)
     if df is None or df.empty:
         if replace:
@@ -132,23 +170,7 @@ def save_frame(
     if time_column not in df.columns:
         raise ValueError(f"DataFrame missing time column {time_column!r}")
 
-    work = df.copy()
-    work[time_column] = pd.to_datetime(work[time_column], errors="coerce", utc=True)
-    work = work.dropna(subset=[time_column]).sort_values(by=time_column)
-    work = work.drop_duplicates(subset=[time_column], keep="last")
-
-    records: list[dict[str, Any]] = []
-    for _, row in work.iterrows():
-        ts = _normalize_ts(row[time_column])
-        payload: dict[str, Any] = {}
-        for col, val in row.items():
-            if col == time_column:
-                continue
-            if pd.isna(val):
-                payload[str(col)] = None
-            else:
-                payload[str(col)] = _to_jsonable(val)
-        records.append({"symbol": symbol, "kind": kind, "ts": ts, "payload": payload})
+    records = _df_to_records(df, symbol=symbol, kind=kind, time_column=time_column)
 
     SessionLocal = get_session_factory()
     with SessionLocal() as session:
@@ -160,7 +182,6 @@ def save_frame(
                 )
             )
         if records:
-            # Batch upserts for large frames
             chunk = 500
             for i in range(0, len(records), chunk):
                 batch = records[i : i + chunk]

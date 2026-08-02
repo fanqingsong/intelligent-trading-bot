@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import PrefectLink from "../components/PrefectLink";
 
 export default function Dashboard() {
   const [data, setData] = useState<any>(null);
@@ -42,7 +43,14 @@ export default function Dashboard() {
       </div>
 
       <div className="panel">
-        <h3>Recent jobs</h3>
+        <h3>
+          Recent jobs{" "}
+          {data?.prefect_ui_url && (
+            <a className="prefect-link" href={data.prefect_ui_url} target="_blank" rel="noreferrer">
+              Prefect UI
+            </a>
+          )}
+        </h3>
         {(data?.recent_jobs || []).length === 0 && <p className="muted">No jobs yet</p>}
         <ul style={{ margin: 0, paddingLeft: "1.1rem" }}>
           {(data?.recent_jobs || []).map((j: any) => (
@@ -54,7 +62,8 @@ export default function Dashboard() {
                 }`}
               >
                 {j.status}
-              </span>
+              </span>{" "}
+              <PrefectLink url={j.prefect_ui_url} />
             </li>
           ))}
         </ul>

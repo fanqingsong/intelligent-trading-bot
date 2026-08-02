@@ -1,6 +1,6 @@
 # Pipeline steps
 
-Offline analysis is a Postgres-backed multi-step pipeline. Each Kedro node reads/writes `market_frames` (symbol + kind) unless noted. Jobs are executed by the **pipeline worker** and controlled from the Web UI:
+Offline analysis is a Postgres-backed multi-step pipeline. Each Kedro node reads/writes `market_frames` (symbol + kind) unless noted. Jobs are queued by **Prefect** and executed by the **prefect-worker** (Kedro session); the pipeline HTTP service only enqueues. Controlled from the Web UI:
 
 - **Watchlist** — `train_update` (with train) or `daily_predict` (skip train) for one or many symbols
 - **Pipeline** — run any subset of offline steps with live logs

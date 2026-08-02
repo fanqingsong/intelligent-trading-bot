@@ -1,6 +1,6 @@
 """Tests for the MLflow-backed ModelStore (pyfunc flavor + Tracking + Registry).
 
-Uses a local MLflow file-store backend in a tmp_path so no server is required.
+Uses a per-test sqlite tracking/registry backend so no server is required.
 Exercises:
 * put→get round-trip for an sklearn pair (lc-style) and a LightGBM Booster
   pair (gb-style), verifying the PairPythonModel survives the registry and
@@ -21,12 +21,13 @@ from kedro_pipeline.classifiers.model_store import ModelStore
 def _config(tmp_path, prefix="itb_test_"):
     # MLflow 3 disables the filesystem tracking backend by default; use sqlite
     # (same class of store as the docker tracking server).
-    db = tmp_path / "mlflow.db"
+    db = (tmp_path / "mlflow.db").resolve()
     return {
         "data_folder": str(tmp_path),
         "symbol": "TEST",
         "model_folder": "MODELS",
-        "mlflow_tracking_uri": f"sqlite:///{db}",
+        # Absolute path → four slashes (sqlite:////abs/path) for SQLAlchemy.
+        "mlflow_tracking_uri": f"sqlite:///{db.as_posix()}",
         "mlflow_experiment_name": f"itb_test_{tmp_path.name}",
         "mlflow_registry_prefix": prefix,
         "labels": ["high_30"],
@@ -35,6 +36,27 @@ def _config(tmp_path, prefix="itb_test_"):
             {"generator": "train_features", "config": {}}
         ],
     }
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mlflow(monkeypatch, tmp_path):
+    """Pin tracking/registry URI per test; clear leaked active runs."""
+    import mlflow
+    from kedro_pipeline.classifiers.model_store import disable_autolog
+
+    cfg = _config(tmp_path)
+    uri = cfg["mlflow_tracking_uri"]
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", uri)
+    mlflow.set_tracking_uri(uri)
+    mlflow.set_registry_uri(uri)
+    if mlflow.active_run() is not None:
+        mlflow.end_run()
+    # Autolog is process-global; keep helpers' .fit() from spawning stray runs.
+    disable_autolog()
+    yield
+    if mlflow.active_run() is not None:
+        mlflow.end_run()
+    disable_autolog()
 
 
 def _features_df():
@@ -167,6 +189,31 @@ def test_put_run_lands_in_named_experiment(tmp_path):
     assert exp.name != "Default"
 
 
+def test_ensure_experiment_restores_soft_deleted(tmp_path):
+    """Retrain must work after the named experiment was soft-deleted in MLflow UI."""
+    cfg = _config(tmp_path)
+    store = ModelStore(cfg)
+    store._ensure_experiment()
+    exp = store._client.get_experiment_by_name(cfg["mlflow_experiment_name"])
+    assert exp is not None
+    store._client.delete_experiment(exp.experiment_id)
+    deleted = store._client.get_experiment_by_name(cfg["mlflow_experiment_name"])
+    assert deleted is not None
+    assert deleted.lifecycle_stage == "deleted"
+
+    store.put_model_pair(
+        "high_30_svc",
+        _make_sklearn_pair(),
+        sample_X=_features_df(),
+        metrics={"auc": 0.9},
+    )
+    restored = store._client.get_experiment_by_name(cfg["mlflow_experiment_name"])
+    assert restored is not None
+    assert restored.lifecycle_stage == "active"
+    versions = store._client.search_model_versions("name='itb_test_high_30_svc'")
+    assert versions
+
+
 def test_put_creates_logged_model_in_experiment(tmp_path):
     """MLflow 3 experiment Models tab is backed by LoggedModels (name= API)."""
     import mlflow
@@ -281,3 +328,45 @@ def test_put_model_pair_under_active_run(tmp_path):
     other = ModelStore(_config(tmp_path))
     loaded = other.get_model_pair("high_30_svc")
     assert loaded.pair[1] is not None
+
+
+def test_training_run_autolog_same_run(tmp_path):
+    """fit() inside training_run shares one run with pyfunc + registry version."""
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+
+    cfg = _config(tmp_path)
+    store = ModelStore(cfg)
+    feats = _features_df()
+    X = feats.values
+    y = np.array([0, 0, 1, 1])
+    scaler = StandardScaler().fit(X)
+
+    with store.training_run("high_30_lc"):
+        # Autolog hooks LogisticRegression.fit into the active training_run.
+        model = LogisticRegression(C=2.5, max_iter=200).fit(scaler.transform(X), y)
+        store.put_model_pair(
+            "high_30_lc",
+            (model, scaler),
+            sample_X=feats,
+            metrics={"auc": 0.85},
+            params={"n_rows": 4, "label": "high_30", "algo": "lc"},
+            algo={"name": "lc", "algo": "lc", "params": {}, "train": {"C": 2.5}},
+            into_active_run=True,
+        )
+
+    versions = store._client.search_model_versions(f"name='{store._reg_name('high_30_lc')}'")
+    assert versions
+    run_id = max(versions, key=lambda v: int(v.version)).run_id
+    data = store._client.get_run(run_id).data
+
+    # Custom metrics/params from put_model_pair
+    assert data.metrics["auc"] == pytest.approx(0.85)
+    assert data.params["n_rows"] == "4"
+    # Sklearn autolog should have captured estimator hyperparams on the same run
+    assert "C" in data.params
+    assert float(data.params["C"]) == pytest.approx(2.5)
+
+    loaded = ModelStore(cfg).get_model_pair("high_30_lc")
+    assert len(loaded.predict_df(feats)) == 4

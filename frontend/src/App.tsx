@@ -1,4 +1,4 @@
-import { NavLink, Route, Routes } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import WatchlistPage from "./pages/Watchlist";
 import Dashboard from "./pages/Dashboard";
 import ConfigPage from "./pages/Config";
@@ -8,16 +8,18 @@ import ModelsPage from "./pages/Models";
 import BacktestPage from "./pages/Backtest";
 import SignalsPage from "./pages/Signals";
 
-const primaryLinks = [["/", "Watchlist"]] as const;
+const primaryLinks = [
+  ["/", "Signals"],
+  ["/watchlist", "Watchlist"],
+  ["/models", "Models"],
+] as const;
 
 const advancedLinks = [
   ["/dashboard", "Dashboard"],
   ["/config", "Config"],
   ["/pipeline", "Pipeline"],
   ["/data", "Data"],
-  ["/models", "Models"],
   ["/backtest", "Backtest"],
-  ["/signals", "Signals"],
 ] as const;
 
 export default function App() {
@@ -44,14 +46,15 @@ export default function App() {
       </aside>
       <main className="main">
         <Routes>
-          <Route path="/" element={<WatchlistPage />} />
+          <Route path="/" element={<SignalsPage />} />
+          <Route path="/watchlist" element={<WatchlistPage />} />
+          <Route path="/signals" element={<Navigate to="/" replace />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/config" element={<ConfigPage />} />
           <Route path="/pipeline" element={<PipelinePage />} />
           <Route path="/data" element={<DataPage />} />
           <Route path="/models" element={<ModelsPage />} />
           <Route path="/backtest" element={<BacktestPage />} />
-          <Route path="/signals" element={<SignalsPage />} />
         </Routes>
       </main>
     </div>

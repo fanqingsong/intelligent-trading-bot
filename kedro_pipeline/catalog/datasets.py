@@ -33,7 +33,8 @@ class PostgresTableDataSet(AbstractDataset[pd.DataFrame, pd.DataFrame]):
     def _save(self, df: pd.DataFrame) -> None:
         from shared.db.frames import save_frame
 
-        save_frame(self._symbol, self._kind, df, time_column=self._time_column, replace=True)
+        # Upsert only — avoid DELETE+full rewrite on every pipeline step.
+        save_frame(self._symbol, self._kind, df, time_column=self._time_column, replace=False)
 
     def _exists(self) -> bool:
         from shared.db.frames import load_frame
