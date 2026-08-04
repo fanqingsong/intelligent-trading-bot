@@ -98,16 +98,19 @@ A 股日线配置：
 
 ## 2. 特征 — 模型输入
 
-基于 `close` 的 12 个 TA-Lib 列，窗口 `{5, 10, 20, 60}`：
+默认使用 **相对 / 无量纲** TA-Lib 特征（避免绝对价格水平的 SMA/STDDEV），共 12 列：
 
-| 类别 | 列名 |
-|------|------|
-| SMA | `close_SMA_5/10/20/60` |
-| 线性回归斜率 | `close_LINEARREG_SLOPE_5/10/20/60` |
-| 标准差 | `close_STDDEV_5/10/20/60` |
+| 类别 | 列名 | 说明 |
+|------|------|------|
+| 动量 | `close_RSI_6/14/24` | 0–100，与股价无关 |
+| 收益率 | `close_ROC_5/10/20` | 百分比变化率 |
+| 趋势震荡 | `close_PPO` | 百分比价格震荡（类 MACD，相对值） |
+| 波动 | `high_low_close_NATR_14` | 归一化 ATR（%） |
+| 趋势强度 | `high_low_close_ADX_14` | 0–100 |
+| 均线结构 | `close_SMA_1/5/20` | `(短窗−长窗)/长窗` 百分比差；`SMA_60` 仅作基准，不入模 |
 
 列在配置的 `train_features` 中；由 `feature_sets` 的 `talib` 生成器产出。
-`features_horizon: 60` 覆盖最长回看窗口。
+`features_horizon: 90` 覆盖最长回看与 ADX 不稳定期。
 
 ---
 

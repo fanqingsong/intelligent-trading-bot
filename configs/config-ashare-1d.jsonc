@@ -7,14 +7,14 @@
 
     "symbol": "600519",
 
-    "description": "A-share watchlist template (multi-algorithm)",
+    "description": "A-share watchlist template (multi-algorithm, relative TA features)",
 
     "freq": "1D",
 
     "merge_trading_days_only": true,
 
     "label_horizon": 5,
-    "features_horizon": 60,
+    "features_horizon": 90,
     "train_length": 0,
     "predict_length": 60,
     "append_overlap_records": 5,
@@ -32,11 +32,31 @@
     ],
 
     // === GENERATE FEATURES ===
+    // Relative / scale-free TA features (avoid absolute price-level SMA/STDDEV).
+    // SMA with rel_*: last window stays absolute — do not put it in train_features.
 
     "feature_sets": [
-        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config":  {"columns": ["close"], "functions": ["SMA"], "windows": [5, 10, 20, 60]}},
-        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config":  {"columns": ["close"], "functions": ["LINEARREG_SLOPE"], "windows": [5, 10, 20, 60]}},
-        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config":  {"columns": ["close"], "functions": ["STDDEV"], "windows": [5, 10, 20, 60]}}
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {
+            "columns": ["close"], "functions": ["RSI"], "windows": [6, 14, 24]
+        }},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {
+            "columns": ["close"], "functions": ["ROC"], "windows": [5, 10, 20]
+        }},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {
+            "columns": ["close"], "functions": ["PPO"], "windows": [null]
+        }},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {
+            "columns": {"high": "high", "low": "low", "close": "close"},
+            "functions": ["NATR"], "windows": [14]
+        }},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {
+            "columns": {"high": "high", "low": "low", "close": "close"},
+            "functions": ["ADX"], "windows": [14]
+        }},
+        {"column_prefix": "", "generator": "talib", "feature_prefix": "", "config": {
+            "columns": ["close"], "functions": ["SMA"], "windows": [1, 5, 20, 60],
+            "parameters": {"rel_base": "next", "rel_func": "rel_diff", "percentage": true}
+        }}
     ],
 
     // === LABELS ===
@@ -49,9 +69,12 @@
     // === TRAIN ===
 
     "train_features": [
-        "close_SMA_5", "close_SMA_10", "close_SMA_20", "close_SMA_60",
-        "close_LINEARREG_SLOPE_5", "close_LINEARREG_SLOPE_10", "close_LINEARREG_SLOPE_20", "close_LINEARREG_SLOPE_60",
-        "close_STDDEV_5", "close_STDDEV_10", "close_STDDEV_20", "close_STDDEV_60"
+        "close_RSI_6", "close_RSI_14", "close_RSI_24",
+        "close_ROC_5", "close_ROC_10", "close_ROC_20",
+        "close_PPO",
+        "high_low_close_NATR_14",
+        "high_low_close_ADX_14",
+        "close_SMA_1", "close_SMA_5", "close_SMA_20"
     ],
 
     "labels": ["high_30", "low_30"],
