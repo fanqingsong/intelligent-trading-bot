@@ -91,7 +91,7 @@ Job presets:
 
 Train-all is sequential and checkpointed in Postgres (`batch_runs` / `symbol_run_links`); see [docs/train-all.md](docs/train-all.md).
 
-More docs: [docs/ashare.md](docs/ashare.md), [docs/scripts.md](docs/scripts.md), [docs/configuration.md](docs/configuration.md), [docs/data-inputs.md](docs/data-inputs.md), [docs/prefect.md](docs/prefect.md), [docs/train-all.md](docs/train-all.md).
+More docs: [docs/ashare.md](docs/ashare.md), [docs/buy-sell-prediction.md](docs/buy-sell-prediction.md), [docs/scripts.md](docs/scripts.md), [docs/configuration.md](docs/configuration.md), [docs/data-inputs.md](docs/data-inputs.md), [docs/prefect.md](docs/prefect.md), [docs/train-all.md](docs/train-all.md).
 
 ## Notes
 

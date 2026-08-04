@@ -63,6 +63,8 @@ Untrained symbols are **skipped** on predict with an error note.
 
 ## Signals
 
+Design detail (Chinese): [buy-sell-prediction.md](buy-sell-prediction.md) — labels, features, algos, vote, and how yesterday’s signal guides today.
+
 For each algorithm `algo ∈ {svc,gb,nn,lc}`:
 
 * Scores: `high_30_{algo}`, `low_30_{algo}`

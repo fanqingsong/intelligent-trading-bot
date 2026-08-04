@@ -61,6 +61,8 @@ These labels can be used to train a classification ML algorithm. In prediction m
 
 ## `highlow2` label generator
 
+Default A-share usage (`high_30` / `low_30`, 3% / 5 bars / first-cross semantics with examples): see [buy-sell-prediction.md](buy-sell-prediction.md).
+
 This label generator returns true or false values by determining whether the price increases (or decreases) significantly within a specified future time horizon.
 
 The generator accepts the following configuration parameters:
