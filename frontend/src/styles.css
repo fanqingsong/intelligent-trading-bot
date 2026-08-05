@@ -508,12 +508,51 @@ table.data th {
 
 /* ----- Signals table ----- */
 
+.signals-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
 .signals-table-wrap {
   max-height: none;
 }
 
 .signals-table th {
   z-index: 1;
+}
+
+.signals-filter-row th {
+  top: 2.1rem;
+  padding-top: 0.25rem;
+  padding-bottom: 0.55rem;
+  vertical-align: top;
+  font-weight: 400;
+}
+
+.signals-filter-input {
+  width: 100%;
+  min-width: 4.5rem;
+  max-width: 9rem;
+  padding: 0.28rem 0.4rem;
+  font-size: 0.78rem;
+}
+
+.signals-filter-range {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.signals-filter-range .signals-filter-input {
+  max-width: 6.5rem;
+}
+
+.signals-empty-filter {
+  text-align: center;
+  padding: 1.25rem 0.55rem !important;
 }
 
 .signals-row {
