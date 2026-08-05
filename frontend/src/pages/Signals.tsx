@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import Gauge from "../components/Gauge";
 import SignalChart from "../components/SignalChart";
@@ -35,15 +35,14 @@ function voteFallbackScore(vote?: string): number {
   return 0;
 }
 
-const VOTE_SECTIONS = [
-  { key: "BUY", title: "买入 BUY", hint: "多数投票为买入" },
-  { key: "SELL", title: "卖出 SELL", hint: "多数投票为卖出" },
-  { key: "HOLD", title: "持有 HOLD", hint: "无明确买卖信号" },
-] as const;
-
 function normalizeVote(vote?: string): "BUY" | "SELL" | "HOLD" {
   if (vote === "BUY" || vote === "SELL") return vote;
   return "HOLD";
+}
+
+function formatScore(score: number | null): string {
+  if (score == null || !Number.isFinite(score)) return "—";
+  return score.toFixed(3);
 }
 
 export default function SignalsPage() {
@@ -52,23 +51,19 @@ export default function SignalsPage() {
   const [symbol, setSymbol] = useState("");
   const [error, setError] = useState("");
   const [showTable, setShowTable] = useState(false);
-  const [holdExpanded, setHoldExpanded] = useState(false);
 
   const selected = useMemo(
     () => items.find((it) => it.symbol === symbol) || null,
     [items, symbol],
   );
 
-  const grouped = useMemo(() => {
-    const buckets: Record<"BUY" | "SELL" | "HOLD", WatchItem[]> = {
-      BUY: [],
-      SELL: [],
-      HOLD: [],
-    };
-    for (const it of items) {
-      buckets[normalizeVote(it.vote)].push(it);
-    }
-    return buckets;
+  const sortedItems = useMemo(() => {
+    return [...items].sort((a, b) => {
+      const sa = avgScore(a.algorithms) ?? voteFallbackScore(a.vote);
+      const sb = avgScore(b.algorithms) ?? voteFallbackScore(b.vote);
+      if (sb !== sa) return sb - sa;
+      return a.symbol.localeCompare(b.symbol);
+    });
   }, [items]);
 
   const loadBoard = useCallback(async () => {
@@ -112,7 +107,6 @@ export default function SignalsPage() {
 
   const openDetail = (sym: string) => {
     setSymbol(sym);
-    // scroll detail into view after render
     window.requestAnimationFrame(() => {
       document.getElementById("signal-detail")?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
@@ -122,7 +116,7 @@ export default function SignalsPage() {
     <div>
       <h1 className="page-title">Signals</h1>
       <p className="page-sub">
-        按 BUY / SELL / HOLD 分组 · 四算法 + 多数投票 · 点击卡片查看详情与历史买卖点
+        按 Score 降序 · 显示 BUY / SELL / HOLD · 点击行查看详情与历史买卖点
       </p>
       {error && <p className="error">{error}</p>}
 
@@ -131,114 +125,62 @@ export default function SignalsPage() {
           <p className="muted">暂无关注股票，请先到 Watchlist 添加</p>
         </div>
       ) : (
-        <div className="signal-sections">
-          {VOTE_SECTIONS.map((sec) => {
-            const list = grouped[sec.key];
-            const isHold = sec.key === "HOLD";
-            const collapsed = isHold && !holdExpanded;
-            return (
-              <section
-                key={sec.key}
-                className={`signal-section signal-section-${sec.key.toLowerCase()}${collapsed ? " is-collapsed" : ""}`}
-              >
-                <div
-                  className={`signal-section-head${isHold ? " is-toggle" : ""}`}
-                  {...(isHold
-                    ? {
-                        role: "button" as const,
-                        tabIndex: 0,
-                        "aria-expanded": holdExpanded,
-                        onClick: () => setHoldExpanded((v) => !v),
-                        onKeyDown: (e: KeyboardEvent) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            setHoldExpanded((v) => !v);
-                          }
-                        },
-                      }
-                    : {})}
-                >
-                  <h2>
-                    {isHold && (
-                      <span className={`signal-section-chevron${holdExpanded ? " open" : ""}`} aria-hidden>
-                        ▸
-                      </span>
-                    )}
-                    <span className={recClass(sec.key)}>{sec.title}</span>
-                    <span className="signal-section-count">{list.length}</span>
-                  </h2>
-                  <p className="muted">
-                    {sec.hint}
-                    {isHold && (
-                      <span className="signal-section-toggle-hint">
-                        {holdExpanded ? " · 点击收起" : " · 点击展开"}
-                      </span>
-                    )}
-                  </p>
-                </div>
-                {!collapsed &&
-                  (list.length === 0 ? (
-                    <p className="muted signal-section-empty">暂无该状态股票</p>
-                  ) : (
-                    <div className="gauge-board">
-                      {list.map((it) => {
-                        const score = avgScore(it.algorithms);
-                        const gaugeValue = score ?? voteFallbackScore(it.vote);
-                        const active = symbol === it.symbol;
+        <div className="panel">
+          <div className="table-wrap signals-table-wrap">
+            <table className="data signals-table">
+              <thead>
+                <tr>
+                  <th>代码</th>
+                  <th>名称</th>
+                  <th>信号</th>
+                  <th>Score</th>
+                  {ALGOS.map((a) => (
+                    <th key={a}>{a.toUpperCase()}</th>
+                  ))}
+                  <th>收盘</th>
+                  <th>时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedItems.map((it) => {
+                  const score = avgScore(it.algorithms);
+                  const vote = normalizeVote(it.vote);
+                  const active = symbol === it.symbol;
+                  return (
+                    <tr
+                      key={it.symbol}
+                      className={`signals-row${active ? " active" : ""}`}
+                      onClick={() => openDetail(it.symbol)}
+                    >
+                      <td>
+                        <strong className="gauge-card-symbol">{it.symbol}</strong>
+                      </td>
+                      <td className="muted">{it.name || it.exchange || "—"}</td>
+                      <td>
+                        <span className={recClass(vote)}>{vote}</span>
+                      </td>
+                      <td className="signals-score">{formatScore(score)}</td>
+                      {ALGOS.map((a) => {
+                        const rec = it.algorithms?.[a]?.recommendation || "HOLD";
+                        const sc = it.algorithms?.[a]?.trade_score;
                         return (
-                          <button
-                            key={it.symbol}
-                            type="button"
-                            className={`gauge-card${active ? " active" : ""}`}
-                            onClick={() => openDetail(it.symbol)}
-                          >
-                            <div className="gauge-card-head">
-                              <div>
-                                <strong className="gauge-card-symbol">{it.symbol}</strong>
-                                <div className="muted gauge-card-name">{it.name || it.exchange}</div>
-                              </div>
-                              <span className={recClass(it.vote)}>{it.vote || "—"}</span>
-                            </div>
-
-                            <Gauge
-                              value={score ?? gaugeValue}
-                              recommendation={it.vote || "HOLD"}
-                              size={180}
-                            />
-
-                            <div className="algo-pills">
-                              {ALGOS.map((a) => {
-                                const rec = it.algorithms?.[a]?.recommendation || "HOLD";
-                                const sc = it.algorithms?.[a]?.trade_score;
-                                return (
-                                  <span
-                                    key={a}
-                                    className={`algo-pill ${recClass(rec)}`}
-                                    title={sc != null ? String(sc) : ""}
-                                  >
-                                    {a.toUpperCase()}
-                                    <em>{rec}</em>
-                                  </span>
-                                );
-                              })}
-                            </div>
-
-                            <div className="gauge-card-meta">
-                              <span>{it.close != null ? Number(it.close).toFixed(2) : "—"}</span>
-                              <span className="muted">
-                                {it.signal_timestamp
-                                  ? new Date(it.signal_timestamp).toLocaleString()
-                                  : "无信号"}
-                              </span>
-                            </div>
-                          </button>
+                          <td key={a} title={sc != null ? String(sc) : ""}>
+                            <span className={recClass(rec)}>{rec}</span>
+                          </td>
                         );
                       })}
-                    </div>
-                  ))}
-              </section>
-            );
-          })}
+                      <td>{it.close != null ? Number(it.close).toFixed(2) : "—"}</td>
+                      <td className="muted">
+                        {it.signal_timestamp
+                          ? new Date(it.signal_timestamp).toLocaleString()
+                          : "无信号"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
