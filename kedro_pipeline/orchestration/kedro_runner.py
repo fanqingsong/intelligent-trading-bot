@@ -64,9 +64,38 @@ def append_log(job_id: str, line: str) -> None:
 
 def update_job(job_id: str, **fields: Any) -> None:
     key = job_key(job_id)
+    # Do not revive a cancelled job (worker may still finish a node after cancel).
+    if "status" in fields and str(fields["status"]) != "cancelled":
+        cur = rds().hget(key, "status")
+        if cur == "cancelled":
+            fields = {k: v for k, v in fields.items() if k != "status"}
+            if not fields:
+                return
     payload = {k: (json.dumps(v) if isinstance(v, (dict, list)) else str(v)) for k, v in fields.items()}
     rds().hset(key, mapping=payload)
     rds().expire(key, 86400)
+
+
+def job_was_cancelled(job_id: str) -> bool:
+    return str(rds().hget(job_key(job_id), "status") or "") == "cancelled"
+
+
+def mark_job_cancelled(job_id: str, *, error: str = "cancelled by user") -> dict[str, Any]:
+    """Mark a Redis job hash as cancelled (terminal)."""
+    key = job_key(job_id)
+    payload = {
+        "status": "cancelled",
+        "error": error,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    }
+    rds().hset(key, mapping=payload)
+    rds().expire(key, 86400)
+    append_log(job_id, f"CANCELLED: {error}")
+    with _jobs_lock:
+        _running_jobs.discard(job_id)
+    data = rds().hgetall(key)
+    data["job_id"] = job_id
+    return data
 
 
 def running_job_ids() -> list[str]:
@@ -136,6 +165,9 @@ def execute_job(
     config_path: str,
     config_overrides: dict | None = None,
 ) -> None:
+    if job_was_cancelled(job_id):
+        append_log(job_id, "Skip start: job already cancelled")
+        return
     with _jobs_lock:
         _running_jobs.add(job_id)
     update_job(
@@ -175,6 +207,9 @@ def execute_job(
         finally:
             clear_job_context()
 
+        if job_was_cancelled(job_id):
+            append_log(job_id, "Job cancelled during run; not marking completed")
+            return
         update_job(
             job_id,
             status="completed",
@@ -184,6 +219,9 @@ def execute_job(
         )
         append_log(job_id, "Job completed successfully.")
     except Exception as e:
+        if job_was_cancelled(job_id):
+            append_log(job_id, f"Job cancelled (ignoring error): {e}")
+            return
         tb = traceback.format_exc()
         append_log(job_id, f"ERROR: {e}")
         append_log(job_id, tb)

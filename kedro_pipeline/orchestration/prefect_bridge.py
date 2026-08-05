@@ -25,6 +25,7 @@ from kedro_pipeline.orchestration.kedro_runner import (
     _jobs_lock,
     _running_jobs,
     append_log,
+    job_was_cancelled,
     load_params,
     select_pipeline,
     update_job,
@@ -41,6 +42,8 @@ def _retry_for_node(node_name: str) -> int:
 
 
 def _run_single_node(job_id: str, node_name: str) -> str:
+    if job_was_cancelled(job_id):
+        raise RuntimeError(f"job {job_id} cancelled")
     state = _JOB_STATE[job_id]
     node = state["nodes"][node_name]
     catalog = state["catalog"]
@@ -106,6 +109,9 @@ def execute_job_fine(
     tags: list[str] | None = None,
 ) -> None:
     """Run Kedro nodes as Prefect tasks (topological order), mirroring Redis job state."""
+    if job_was_cancelled(job_id):
+        append_log(job_id, "Skip start: job already cancelled")
+        return
     with _jobs_lock:
         _running_jobs.add(job_id)
 
@@ -155,8 +161,14 @@ def execute_job_fine(
                 "total": max(len(ordered_names), 1),
             }
             for node_name in ordered_names:
+                if job_was_cancelled(job_id):
+                    append_log(job_id, f"Aborting before node {node_name}: cancelled")
+                    return
                 _invoke_node_task(job_id, node_name)
 
+        if job_was_cancelled(job_id):
+            append_log(job_id, "Job cancelled during run; not marking completed")
+            return
         update_job(
             job_id,
             status="completed",
@@ -166,6 +178,9 @@ def execute_job_fine(
         )
         append_log(job_id, "Job completed successfully (fine-grained).")
     except Exception as e:
+        if job_was_cancelled(job_id):
+            append_log(job_id, f"Job cancelled (ignoring error): {e}")
+            return
         tb = traceback.format_exc()
         append_log(job_id, f"ERROR: {e}")
         append_log(job_id, tb)

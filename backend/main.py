@@ -327,6 +327,17 @@ def watchlist_train_active():
     return {"batch": batch}
 
 
+@app.post("/api/watchlist/train/cancel")
+async def watchlist_train_cancel():
+    """Cancel the open train-all batch (remaining symbols skipped)."""
+    from backend.watchlist_service import cancel_open_train_batch
+
+    batch = await cancel_open_train_batch()
+    if batch is None:
+        raise HTTPException(404, "No active train batch")
+    return {"batch": batch}
+
+
 @app.post("/api/watchlist/{symbol}/train")
 async def watchlist_train(
     symbol: str,
@@ -338,6 +349,19 @@ async def watchlist_train(
     require_team(caller, team)
     try:
         return await train_symbol(symbol, team=team)
+    except KeyError:
+        raise HTTPException(404, "Symbol not in watchlist") from None
+    except Exception as e:
+        raise HTTPException(503, str(e)) from e
+
+
+@app.post("/api/watchlist/{symbol}/train/cancel")
+async def watchlist_train_symbol_cancel(symbol: str):
+    """Cancel in-flight train for one symbol (also skips it in an open train-all batch)."""
+    from backend.watchlist_service import cancel_train_symbol
+
+    try:
+        return await cancel_train_symbol(symbol)
     except KeyError:
         raise HTTPException(404, "Symbol not in watchlist") from None
     except Exception as e:

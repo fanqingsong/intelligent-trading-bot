@@ -9,9 +9,11 @@ Models 页的 **更新全部模型** 会按关注列表顺序，对每只股票�
 
 | 层 | 位置 |
 |----|------|
-| UI | Models → 运维操作 → **更新全部模型** |
+| UI | Models → 运维操作 → **更新全部模型** / **停止批量** |
 | API | `POST /api/watchlist/train` |
 | 进度查询 | `GET /api/watchlist/train/active` |
+| 取消整批 | `POST /api/watchlist/train/cancel`（取消 Prefect job + 释放并发槽；未完成 link → `skipped`） |
+| 取消单股 | `POST /api/watchlist/{symbol}/train/cancel` |
 | 编排 | `backend/watchlist_service.py` → `train_symbols` / `_process_train_batch` |
 
 请求体（可选）：
@@ -95,8 +97,9 @@ ORM：`backend/db/models.py`（`BatchRun` / `SymbolRunLink` / `WatchlistItem`）
 
 ## UI 行为
 
-- 批量进行中：按钮文案变为「批量更新进行中…」并禁用
-- 进度文案：`批量训练 #id：已完成 N/M · 当前 symbol`
+- 批量进行中：按钮文案变为「批量更新进行中…」并禁用；可点 **停止批量**
+- 进度文案：`批量训练 #id：已完成 N/M · 排队/进行中/失败 · 当前 symbol`
+- 处理器异常时展示 `last_error`（自动重试；重启后会清掉陈旧错误）
 - 关注列表行上的 `train_status` / `JobProgress` 与单股训练相同（轮询 `GET /api/watchlist`）
 
 ## 相关 API / 代码
@@ -106,10 +109,14 @@ ORM：`backend/db/models.py`（`BatchRun` / `SymbolRunLink` / `WatchlistItem`）
 | `train_symbols` | `backend/watchlist_service.py` |
 | `_process_train_batch` | 同上 |
 | `resume_open_train_batches` | 同上 |
+| `cancel_open_train_batch` | 同上 |
 | `sync_job_status` | 同上（同步 watchlist + link） |
 | `POST /api/watchlist/train` | `backend/main.py` |
 | `GET /api/watchlist/train/active` | `backend/main.py` |
-| `api.watchlistTrainAll` | `frontend/src/api.ts` |
+| `POST /api/watchlist/train/cancel` | `backend/main.py` |
+| `POST /api/watchlist/{symbol}/train/cancel` | `backend/main.py` |
+| `POST /internal/jobs/{job_id}/cancel` | `kedro_pipeline/worker/api.py` |
+| `api.watchlistTrainAll` / `watchlistTrainCancel` / `watchlistTrainSymbolCancel` | `frontend/src/api.ts` |
 | Models 页按钮 | `frontend/src/pages/Models.tsx` |
 
 环境变量（可选）：

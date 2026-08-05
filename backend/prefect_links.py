@@ -77,6 +77,54 @@ async def fetch_flow_run(flow_run_id: str) -> dict[str, Any] | None:
     }
 
 
+async def cancel_flow_run(flow_run_id: str, *, reason: str = "cancelled by user") -> bool:
+    """Best-effort cancel of a Prefect flow run. Returns True if the request was sent."""
+    if not flow_run_id or not prefect_api_url():
+        return False
+    from prefect.client.orchestration import get_client
+    from prefect.states import Cancelled
+
+    try:
+        async with get_client() as client:
+            await client.set_flow_run_state(
+                UUID(str(flow_run_id)),
+                state=Cancelled(message=reason),
+                force=True,
+            )
+        return True
+    except Exception as e:
+        print(f"WARN: cancel flow run {flow_run_id} failed: {e}")
+        return False
+
+
+async def release_concurrency_slots(names: list[str], *, slots: int = 1) -> None:
+    """Release leaked global concurrency slots after a forced cancel."""
+    names = [n for n in names if n]
+    if not names or not prefect_api_url():
+        return
+    from prefect.client.orchestration import get_client
+
+    try:
+        async with get_client() as client:
+            for name in names:
+                try:
+                    lim = await client.read_global_concurrency_limit_by_name(name)
+                except Exception:
+                    continue
+                active = int(getattr(lim, "active_slots", 0) or 0)
+                if active <= 0:
+                    continue
+                to_release = min(slots, active)
+                try:
+                    await client.release_concurrency_slots(
+                        [name], slots=to_release, occupancy_seconds=1.0
+                    )
+                except Exception as e:
+                    print(f"WARN: release concurrency {name} failed: {e}")
+    except Exception as e:
+        print(f"WARN: release concurrency slots failed: {e}")
+
+
 def _map_prefect_state(state: str) -> str:
     s = state.upper()
     if s in ("COMPLETED", "COMPLETE"):

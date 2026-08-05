@@ -194,6 +194,70 @@ def get_job(job_id: str):
     return data
 
 
+@app.post("/internal/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str):
+    """Cancel a queued/running job (Prefect flow run + Redis status + concurrency slots)."""
+    from kedro_pipeline.orchestration.kedro_runner import mark_job_cancelled
+
+    data = rds().hgetall(job_key(job_id))
+    if not data:
+        raise HTTPException(404, "Job not found")
+    status = str(data.get("status") or "")
+    if status in ("completed", "failed", "cancelled"):
+        data["job_id"] = job_id
+        # Still try to free leaked slots for already-cancelled jobs.
+        await _release_job_slots(data)
+        return data
+
+    flow_run_id = str(data.get("prefect_flow_run_id") or "").strip()
+    if flow_run_id:
+        try:
+            from backend.prefect_links import cancel_flow_run
+
+            await cancel_flow_run(flow_run_id, reason="cancelled by user")
+        except Exception as e:
+            append_log(job_id, f"WARN: Prefect cancel failed: {e}")
+
+    out = mark_job_cancelled(job_id, error="cancelled by user")
+    await _release_job_slots(out)
+    if "steps" in out:
+        try:
+            out["steps"] = json.loads(out["steps"]) if isinstance(out["steps"], str) else out["steps"]
+        except Exception:
+            pass
+    try:
+        from backend.prefect_links import enrich_job
+
+        out = enrich_job(out)
+    except Exception:
+        pass
+    return out
+
+
+async def _release_job_slots(job: dict[str, Any]) -> None:
+    symbol = str(job.get("symbol") or "").strip()
+    if not symbol:
+        return
+    steps = job.get("steps")
+    if isinstance(steps, str):
+        try:
+            steps = json.loads(steps)
+        except Exception:
+            steps = []
+    from kedro_pipeline.orchestration.concurrency import concurrency_names_for_job
+    from kedro_pipeline.orchestration.teams import job_kind
+
+    kind = job_kind(list(steps or []), {"symbol": symbol})
+    names = concurrency_names_for_job(symbol, is_train=(kind == "train"))
+    try:
+        from backend.prefect_links import release_concurrency_slots
+
+        await release_concurrency_slots(names, slots=1)
+        append_log(str(job.get("job_id") or ""), f"Released concurrency slots: {names}")
+    except Exception as e:
+        append_log(str(job.get("job_id") or ""), f"WARN: slot release failed: {e}")
+
+
 @app.get("/internal/jobs/{job_id}/logs")
 def get_logs(job_id: str, offset: int = 0):
     if not rds().exists(job_key(job_id)):

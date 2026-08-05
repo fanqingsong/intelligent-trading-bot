@@ -241,6 +241,17 @@ async def train_symbol(symbol: str, *, team: str | None = None) -> dict[str, Any
     }
 
 
+def _batch_last_error(note: str) -> str:
+    """Surface the latest processor_error line from batch.note for the UI."""
+    if not note:
+        return ""
+    for line in reversed(note.splitlines()):
+        line = line.strip()
+        if line.startswith("processor_error:"):
+            return line.removeprefix("processor_error:").strip()
+    return ""
+
+
 def _batch_progress(session, batch_id: int) -> dict[str, Any]:
     batch = session.get(BatchRun, batch_id)
     links = list(
@@ -256,11 +267,13 @@ def _batch_progress(session, batch_id: int) -> dict[str, Any]:
         counts[link.status] = counts.get(link.status, 0) + 1
         if not current_symbol and link.status in ("queued", "running"):
             current_symbol = link.symbol
+    note = batch.note if batch else ""
     return {
         "batch_id": batch_id,
         "kind": batch.kind if batch else "train",
         "status": batch.status if batch else "unknown",
-        "note": batch.note if batch else "",
+        "note": note,
+        "last_error": _batch_last_error(note),
         "total": len(links),
         "current_symbol": current_symbol,
         **counts,
@@ -316,6 +329,154 @@ async def resume_open_train_batches() -> list[int]:
     for batch_id in batch_ids:
         _ensure_train_batch_processor(batch_id)
     return batch_ids
+
+
+def _restore_train_status_after_cancel(item: WatchlistItem, *, error: str) -> None:
+    """Reset watchlist train status after cancel; keep ready if previously trained."""
+    item.train_status = "ready" if item.last_trained_at else "untrained"
+    item.last_error = error
+
+
+async def _cancel_pipeline_job(job_id: str) -> dict[str, Any] | None:
+    """Cancel a pipeline/Prefect job. Best-effort; returns job payload or None."""
+    if not job_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{PIPELINE_URL}/internal/jobs/{job_id}/cancel")
+        if resp.status_code == 404:
+            return None
+        if resp.status_code >= 400:
+            print(f"WARN: cancel job {job_id}: {resp.status_code} {resp.text[:200]}")
+            return None
+        return resp.json()
+    except Exception as e:
+        print(f"WARN: cancel job {job_id} failed: {e}")
+        return None
+
+
+async def cancel_open_train_batch() -> dict[str, Any] | None:
+    """Cancel the open train-all batch: stop processor, cancel jobs, skip links."""
+    batch_id = find_open_train_batch_id()
+    if batch_id is None:
+        return None
+
+    task = _train_batch_tasks.pop(batch_id, None)
+    _train_batch_teams.pop(batch_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        links = list(
+            session.scalars(
+                select(SymbolRunLink).where(
+                    SymbolRunLink.batch_id == batch_id,
+                    SymbolRunLink.status.in_(("queued", "running")),
+                )
+            ).all()
+        )
+        job_ids = [link.job_id for link in links if link.job_id]
+        # Also cancel any orphaned in-flight train jobs (e.g. leftover from prior batch).
+        for item in session.scalars(
+            select(WatchlistItem).where(WatchlistItem.train_status.in_(("queued", "running")))
+        ).all():
+            if item.last_train_job_id and item.last_train_job_id not in job_ids:
+                job_ids.append(item.last_train_job_id)
+        link_ids = [link.id for link in links]
+
+    for job_id in job_ids:
+        await _cancel_pipeline_job(job_id)
+
+    with SessionLocal() as session:
+        for link_id in link_ids:
+            link = session.get(SymbolRunLink, link_id)
+            if not link or link.status in _TERMINAL_LINK:
+                continue
+            link.status = "skipped"
+            link.error = "cancelled by user"
+            item = session.get(WatchlistItem, link.symbol)
+            if item and item.train_status in ("queued", "running"):
+                _restore_train_status_after_cancel(item, error="batch cancelled")
+        # Clear any remaining in-flight train flags outside skipped links.
+        for item in session.scalars(
+            select(WatchlistItem).where(WatchlistItem.train_status.in_(("queued", "running")))
+        ).all():
+            _restore_train_status_after_cancel(item, error="batch cancelled")
+        batch = session.get(BatchRun, batch_id)
+        if batch and batch.status in ("queued", "running"):
+            note = batch.note or ""
+            if "cancelled by user" not in note:
+                batch.note = (note + "\ncancelled by user").strip()[:2000]
+            _maybe_finish_batch(session, batch_id)
+        session.commit()
+        return _batch_progress(session, batch_id)
+
+
+async def cancel_train_symbol(symbol: str) -> dict[str, Any]:
+    """Cancel in-flight train for one symbol (single-run or current batch slot)."""
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        item = session.get(WatchlistItem, symbol)
+        if not item:
+            raise KeyError(symbol)
+        was_inflight = item.train_status in ("queued", "running")
+        open_links = list(
+            session.scalars(
+                select(SymbolRunLink)
+                .where(
+                    SymbolRunLink.symbol == symbol,
+                    SymbolRunLink.status.in_(("queued", "running")),
+                )
+                .order_by(SymbolRunLink.id.desc())
+            ).all()
+        )
+        job_ids: list[str] = []
+        if was_inflight and item.last_train_job_id:
+            job_ids.append(item.last_train_job_id)
+        for link in open_links:
+            if link.job_id and link.job_id not in job_ids:
+                job_ids.append(link.job_id)
+        link_ids = [link.id for link in open_links]
+        batch_ids = list({link.batch_id for link in open_links if link.batch_id})
+        current_status = item.train_status
+
+    if not was_inflight and not job_ids and not link_ids:
+        return {
+            "symbol": symbol,
+            "status": current_status,
+            "job_id": "",
+            "cancelled": False,
+            "message": "no in-flight train",
+        }
+
+    for jid in job_ids:
+        await _cancel_pipeline_job(jid)
+
+    with SessionLocal() as session:
+        item = session.get(WatchlistItem, symbol)
+        if item and item.train_status in ("queued", "running"):
+            _restore_train_status_after_cancel(item, error="cancelled by user")
+        for link_id in link_ids:
+            link = session.get(SymbolRunLink, link_id)
+            if link and link.status not in _TERMINAL_LINK:
+                link.status = "skipped"
+                link.error = "cancelled by user"
+                _maybe_finish_batch(session, link.batch_id)
+        for batch_id in batch_ids:
+            _maybe_finish_batch(session, batch_id)
+        session.commit()
+        item = session.get(WatchlistItem, symbol)
+        return {
+            "symbol": symbol,
+            "status": item.train_status if item else "idle",
+            "job_id": job_ids[0] if job_ids else "",
+            "cancelled": True,
+        }
 
 
 async def train_symbols(
@@ -387,15 +548,21 @@ async def train_symbols(
     return progress
 
 
-async def _fetch_job(job_id: str) -> dict[str, Any] | None:
+async def _fetch_job(
+    job_id: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any] | None:
+    """Fetch a pipeline job by id. Optional shared ``client`` avoids per-call pools."""
     if not job_id:
         return None
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        if client is None:
+            async with httpx.AsyncClient(timeout=10.0) as own:
+                resp = await own.get(f"{PIPELINE_URL}/internal/jobs/{job_id}")
+        else:
             resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{job_id}")
-        if resp.status_code == 404:
-            return None
-        if resp.status_code >= 400:
+        if resp.status_code != 200:
             return None
         return resp.json()
     except Exception:
@@ -405,6 +572,15 @@ async def _fetch_job(job_id: str) -> dict[str, Any] | None:
 async def _process_train_batch(batch_id: int, *, team: str | None = None) -> None:
     """Walk SymbolRunLinks in order: enqueue one, wait until terminal, then next."""
     SessionLocal = get_session_factory()
+    # Drop stale processor_error lines from earlier crash loops once we are running again.
+    with SessionLocal() as session:
+        batch = session.get(BatchRun, batch_id)
+        if batch and batch.note and "processor_error:" in batch.note:
+            cleaned = "\n".join(
+                ln for ln in batch.note.splitlines() if not ln.strip().startswith("processor_error:")
+            ).strip()
+            batch.note = cleaned
+            session.commit()
     try:
         while True:
             with SessionLocal() as session:
@@ -486,13 +662,13 @@ async def _process_train_batch(batch_id: int, *, team: str | None = None) -> Non
 
             status = str(data.get("status") or "")
             error = str(data.get("error") or "")
-            if status in ("completed", "failed"):
+            if status in ("completed", "failed", "cancelled"):
                 sync_job_status(symbol, job_id, "train", status, error)
                 # Ensure we advance even if sync missed the link.
                 with SessionLocal() as session:
                     link = session.get(SymbolRunLink, link_id)
                     if link and link.status not in _TERMINAL_LINK:
-                        link.status = status
+                        link.status = "skipped" if status == "cancelled" else status
                         if error:
                             link.error = error
                         _maybe_finish_batch(session, batch_id)
@@ -509,8 +685,11 @@ async def _process_train_batch(batch_id: int, *, team: str | None = None) -> Non
         with SessionLocal() as session:
             batch = session.get(BatchRun, batch_id)
             if batch and batch.status in ("queued", "running"):
-                # Leave batch open so startup resume can retry.
-                batch.note = (batch.note or "") + f"\nprocessor_error: {e}"
+                # Leave batch open so startup resume can retry; avoid note spam on crash loops.
+                err_line = f"processor_error: {e}"
+                note = batch.note or ""
+                if err_line not in note:
+                    batch.note = (note + "\n" + err_line).strip()[:2000]
                 session.commit()
     finally:
         task = _train_batch_tasks.get(batch_id)
@@ -715,6 +894,8 @@ def sync_job_status(symbol: str, job_id: str, kind: str, status: str, error: str
             elif status == "failed":
                 item.train_status = "failed"
                 item.last_error = error or "train failed"
+            elif status == "cancelled":
+                _restore_train_status_after_cancel(item, error=error or "cancelled by user")
             elif status == "running":
                 item.train_status = "running"
             elif status == "queued":
@@ -727,6 +908,9 @@ def sync_job_status(symbol: str, job_id: str, kind: str, status: str, error: str
             elif status == "failed":
                 item.predict_status = "failed"
                 item.last_error = error or "predict failed"
+            elif status == "cancelled":
+                item.predict_status = "idle"
+                item.last_error = error or "cancelled by user"
             elif status == "running":
                 item.predict_status = "running"
             elif status == "queued":
@@ -737,12 +921,12 @@ def sync_job_status(symbol: str, job_id: str, kind: str, status: str, error: str
             else:
                 item.last_predict_job_id = job_id
 
-        if job_id and status in ("completed", "failed", "running", "queued"):
+        if job_id and status in ("completed", "failed", "cancelled", "running", "queued"):
             links = list(
                 session.scalars(select(SymbolRunLink).where(SymbolRunLink.job_id == job_id)).all()
             )
             for link in links:
-                link.status = status
+                link.status = "skipped" if status == "cancelled" else status
                 if error:
                     link.error = error
                 _maybe_finish_batch(session, link.batch_id)
@@ -807,16 +991,6 @@ def _job_progress_payload(kind: str, job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _fetch_job(client: httpx.AsyncClient, job_id: str) -> dict[str, Any] | None:
-    try:
-        resp = await client.get(f"{PIPELINE_URL}/internal/jobs/{job_id}")
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception:
-        return None
-    return None
-
-
 async def refresh_running_statuses() -> None:
     """Poll Redis/pipeline for in-flight watchlist jobs and sync DB status."""
     SessionLocal = get_session_factory()
@@ -849,7 +1023,9 @@ async def refresh_running_statuses() -> None:
 
     if pending:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            results = await asyncio.gather(*[_fetch_job(client, job_id) for _, job_id, _ in pending])
+            results = await asyncio.gather(
+                *[_fetch_job(job_id, client=client) for _, job_id, _ in pending]
+            )
         for (symbol, job_id, kind), data in zip(pending, results):
             if not data:
                 continue
@@ -876,7 +1052,9 @@ async def enrich_items_with_job_progress(items: list[dict[str, Any]]) -> list[di
 
     out = [dict(item) for item in items]
     async with httpx.AsyncClient(timeout=10.0) as client:
-        results = await asyncio.gather(*[_fetch_job(client, job_id) for _, _, job_id in need])
+        results = await asyncio.gather(
+            *[_fetch_job(job_id, client=client) for _, _, job_id in need]
+        )
     for (idx, kind, _), data in zip(need, results):
         if not data:
             continue

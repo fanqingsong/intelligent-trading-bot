@@ -115,6 +115,7 @@ export const api = {
       failed: number;
       skipped: number;
       current_symbol: string;
+      last_error?: string;
       resumed?: boolean;
       deduped?: boolean;
       steps: string[];
@@ -134,8 +135,33 @@ export const api = {
         failed: number;
         skipped: number;
         current_symbol: string;
+        last_error?: string;
+        note?: string;
       } | null;
     }>("/api/watchlist/train/active"),
+  watchlistTrainCancel: () =>
+    request<{
+      batch: {
+        batch_id: number;
+        status: string;
+        total: number;
+        queued: number;
+        running: number;
+        completed: number;
+        failed: number;
+        skipped: number;
+        current_symbol: string;
+        last_error?: string;
+      };
+    }>("/api/watchlist/train/cancel", { method: "POST" }),
+  watchlistTrainSymbolCancel: (symbol: string) =>
+    request<{
+      symbol: string;
+      status: string;
+      job_id: string;
+      cancelled: boolean;
+      message?: string;
+    }>(`/api/watchlist/${encodeURIComponent(symbol)}/train/cancel`, { method: "POST" }),
   watchlistPredict: (symbols?: string[], team?: string) =>
     request<{ batch_id: number; jobs: JobRef[]; skipped: any[] }>("/api/watchlist/predict", {
       method: "POST",

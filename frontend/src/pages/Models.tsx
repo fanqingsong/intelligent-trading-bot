@@ -60,6 +60,7 @@ export default function ModelsPage() {
     failed: number;
     skipped: number;
     current_symbol: string;
+    last_error?: string;
   } | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const logViewRef = useRef<HTMLDivElement | null>(null);
@@ -221,6 +222,7 @@ export default function ModelsPage() {
           failed: res.failed,
           skipped: res.skipped,
           current_symbol: res.current_symbol,
+          last_error: res.last_error,
         });
       }
       if (res.total === 0) {
@@ -232,6 +234,42 @@ export default function ModelsPage() {
     } finally {
       setBusy("");
     }
+  };
+
+  const cancelTrainAll = async () => {
+    setBusy("train-cancel");
+    setError("");
+    try {
+      await api.watchlistTrainCancel();
+      setTrainBatch(null);
+      await loadWatchlist();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const cancelTrainOne = async (sym: string) => {
+    setBusy(`cancel-${sym}`);
+    setError("");
+    try {
+      await api.watchlistTrainSymbolCancel(sym);
+      await loadWatchlist();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const canStopTrain = (it?: WatchItem | null) => {
+    if (!it) return false;
+    if (it.train_status === "running") return true;
+    // Queued with a real job, or the current train-all slot.
+    if (it.train_status === "queued" && it.last_train_job_id) return true;
+    if (trainBatch && trainBatch.current_symbol === it.symbol) return true;
+    return false;
   };
 
   const saveSchedule = async () => {
@@ -330,11 +368,21 @@ export default function ModelsPage() {
           )}
           <button
             className="btn primary"
-            disabled={!!busy || !symbol}
+            disabled={!!busy || !symbol || canStopTrain(current)}
             onClick={() => trainOne(symbol)}
           >
             更新模型
           </button>
+          {canStopTrain(current) && (
+            <button
+              className="btn"
+              disabled={!!busy}
+              onClick={() => cancelTrainOne(symbol)}
+              title="停止当前股票的训练任务（含 Prefect / 并发槽）"
+            >
+              停止更新
+            </button>
+          )}
           <button
             className="btn primary"
             disabled={!!busy || items.length === 0 || !!trainBatch}
@@ -343,17 +391,37 @@ export default function ModelsPage() {
           >
             {trainBatch ? "批量更新进行中…" : "更新全部模型"}
           </button>
+          {trainBatch && (
+            <button
+              className="btn"
+              disabled={!!busy}
+              onClick={cancelTrainAll}
+              title="停止批量更新并取消进行中的 Prefect 任务"
+            >
+              停止批量
+            </button>
+          )}
           <button className="btn" disabled={!!busy || items.length === 0} onClick={predictAll}>
             一键预测
           </button>
         </div>
         {trainBatch && (
-          <p className="muted" style={{ marginTop: 0, marginBottom: "0.75rem" }}>
-            批量训练 #{trainBatch.batch_id}：已完成 {trainBatch.completed}/{trainBatch.total}
-            {trainBatch.failed ? ` · 失败 ${trainBatch.failed}` : ""}
-            {trainBatch.current_symbol ? ` · 当前 ${trainBatch.current_symbol}` : ""}
-            {" · 支持断点续作"}
-          </p>
+          <div style={{ marginTop: 0, marginBottom: "0.75rem" }}>
+            <p className="muted" style={{ margin: 0 }}>
+              批量训练 #{trainBatch.batch_id}：已完成 {trainBatch.completed}/{trainBatch.total}
+              {trainBatch.running ? ` · 进行中 ${trainBatch.running}` : ""}
+              {trainBatch.queued ? ` · 排队 ${trainBatch.queued}` : ""}
+              {trainBatch.failed ? ` · 失败 ${trainBatch.failed}` : ""}
+              {trainBatch.skipped ? ` · 跳过 ${trainBatch.skipped}` : ""}
+              {trainBatch.current_symbol ? ` · 当前 ${trainBatch.current_symbol}` : ""}
+              {" · 支持断点续作"}
+            </p>
+            {trainBatch.last_error && (
+              <p className="error" style={{ fontSize: "0.85rem", margin: "0.35rem 0 0" }}>
+                处理器异常（将自动重试）：{trainBatch.last_error}
+              </p>
+            )}
+          </div>
         )}
         {current?.job_progress && <JobProgress job={current.job_progress} />}
         {current?.last_error &&
@@ -430,17 +498,33 @@ export default function ModelsPage() {
                     )}
                   </td>
                   <td>
-                    <button
-                      className="btn primary"
-                      disabled={!!busy}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        selectSymbol(it.symbol);
-                        trainOne(it.symbol);
-                      }}
-                    >
-                      更新模型
-                    </button>
+                    <div className="btn-row" style={{ flexWrap: "wrap", gap: "0.35rem" }}>
+                      {canStopTrain(it) ? (
+                        <button
+                          className="btn"
+                          disabled={!!busy}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            selectSymbol(it.symbol);
+                            cancelTrainOne(it.symbol);
+                          }}
+                        >
+                          停止
+                        </button>
+                      ) : (
+                        <button
+                          className="btn primary"
+                          disabled={!!busy || !!trainBatch}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            selectSymbol(it.symbol);
+                            trainOne(it.symbol);
+                          }}
+                        >
+                          更新模型
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
