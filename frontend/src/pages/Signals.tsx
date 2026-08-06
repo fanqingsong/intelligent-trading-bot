@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { api } from "../api";
 import Gauge from "../components/Gauge";
+import JobProgress, { type JobProgressInfo } from "../components/JobProgress";
 import SignalChart from "../components/SignalChart";
 import { ALGOS, recClass } from "../lib/status";
 
@@ -18,6 +19,9 @@ type WatchItem = {
   close?: number | null;
   signal_timestamp?: string | null;
   signal_available?: boolean;
+  predict_status?: string;
+  predict_job?: JobProgressInfo | null;
+  job_progress?: JobProgressInfo | null;
 };
 
 type VoteFilter = "" | "BUY" | "SELL" | "HOLD";
@@ -50,8 +54,12 @@ const VOTE_OPTIONS: { value: VoteFilter; label: string }[] = [
   { value: "", label: "全部" },
   { value: "BUY", label: "BUY" },
   { value: "SELL", label: "SELL" },
-  { value: "HOLD", label: "HOLD" },
+  { value: "HOLD", label: "无信号" },
 ];
+
+function hasTradeSignal(it: WatchItem): boolean {
+  return Boolean(it.signal_timestamp) && (it.vote === "BUY" || it.vote === "SELL");
+}
 
 function avgScore(algos?: Record<string, AlgoSummary>): number | null {
   if (!algos) return null;
@@ -116,6 +124,8 @@ export default function SignalsPage() {
   const [data, setData] = useState<any>(null);
   const [symbol, setSymbol] = useState("");
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [busy, setBusy] = useState(false);
   const [showTable, setShowTable] = useState(false);
   const [filters, setFilters] = useState<TableFilters>(EMPTY_FILTERS);
 
@@ -153,12 +163,52 @@ export default function SignalsPage() {
 
       if (!inRange(it.close ?? null, filters.closeMin, filters.closeMax)) return false;
 
-      if (filters.hasSignal === "yes" && !it.signal_timestamp) return false;
-      if (filters.hasSignal === "no" && it.signal_timestamp) return false;
+      if (filters.hasSignal === "yes" && !hasTradeSignal(it)) return false;
+      if (filters.hasSignal === "no" && hasTradeSignal(it)) return false;
 
       return true;
     });
   }, [sortedItems, filters]);
+
+  const predicting = useMemo(
+    () =>
+      items.some(
+        (it) => it.predict_status === "running" || it.predict_status === "queued",
+      ),
+    [items],
+  );
+
+  const predictStats = useMemo(() => {
+    let queued = 0;
+    let running = 0;
+    let failed = 0;
+    for (const it of items) {
+      if (it.predict_status === "queued") queued += 1;
+      else if (it.predict_status === "running") running += 1;
+      else if (it.predict_status === "failed") failed += 1;
+    }
+    return { queued, running, failed, active: queued + running };
+  }, [items]);
+
+  const activePredictJob = useMemo(() => {
+    const jobOf = (it: WatchItem) => it.job_progress || it.predict_job || null;
+    const running = items.find((it) => it.predict_status === "running" && jobOf(it));
+    if (running) return jobOf(running);
+    // Prefer the queued job that already has step progress over a pure "排队中".
+    let best: JobProgressInfo | null = null;
+    let bestProgress = -1;
+    for (const it of items) {
+      if (it.predict_status !== "queued") continue;
+      const job = jobOf(it);
+      if (!job) continue;
+      const p = Number(job.progress || 0);
+      if (p > bestProgress || (p === bestProgress && job.current_step)) {
+        best = job;
+        bestProgress = p;
+      }
+    }
+    return best;
+  }, [items]);
 
   const loadBoard = useCallback(async () => {
     try {
@@ -166,7 +216,6 @@ export default function SignalsPage() {
       const list = r.items || [];
       setItems(list);
       setSymbol((prev) => prev || (list[0]?.symbol ?? ""));
-      setError("");
     } catch (e: any) {
       setError(String(e.message || e));
     }
@@ -189,15 +238,109 @@ export default function SignalsPage() {
     [symbol],
   );
 
-  useEffect(() => {
-    loadBoard();
-    const t = window.setInterval(loadBoard, 5000);
-    return () => window.clearInterval(t);
+  const predictAll = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    setInfo("");
+    try {
+      const res = await api.watchlistPredict();
+      await loadBoard();
+      const nJobs = (res.jobs || []).length;
+      const skipped = res.skipped || [];
+      if (nJobs) {
+        setInfo(`已提交 ${nJobs} 只股票的数据更新与预测（含 download→signals）`);
+      }
+      if (skipped.length) {
+        const syms = skipped.map((s: any) => s.symbol).join(", ");
+        setError(
+          nJobs
+            ? `部分跳过（需先训练）：${syms}`
+            : `全部跳过（需先到 Models 更新模型）：${syms}`,
+        );
+      }
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
   }, [loadBoard]);
+
+  const predictOne = useCallback(
+    async (sym: string) => {
+      if (!sym) return;
+      setBusy(true);
+      setError("");
+      setInfo("");
+      try {
+        const res = await api.watchlistPredict([sym]);
+        await loadBoard();
+        await loadHistory(sym);
+        if ((res.jobs || []).length) {
+          setInfo(`${sym}：已提交数据更新与预测`);
+        } else if ((res.skipped || []).length) {
+          setError(`${sym}：未训练，请先到 Models 更新模型`);
+        }
+      } catch (e: any) {
+        setError(String(e.message || e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [loadBoard, loadHistory],
+  );
+
+  const cancelPredict = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    setInfo("");
+    try {
+      await api.watchlistPredictCancel();
+      setInfo("已取消进行中的预测任务");
+      await loadBoard();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }, [loadBoard]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    let inFlight = false;
+
+    const tick = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        await loadBoard();
+      } finally {
+        inFlight = false;
+        if (!cancelled) {
+          timer = window.setTimeout(tick, predicting ? 2000 : 5000);
+        }
+      }
+    };
+
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, [loadBoard, predicting]);
 
   useEffect(() => {
     if (symbol) loadHistory(symbol);
   }, [symbol, loadHistory]);
+
+  // After a predict batch settles, refresh the open chart/history.
+  const wasPredicting = useRef(false);
+  useEffect(() => {
+    if (wasPredicting.current && !predicting && symbol) {
+      loadHistory(symbol);
+    }
+    wasPredicting.current = predicting;
+  }, [predicting, symbol, loadHistory]);
 
   const openDetail = (sym: string) => {
     setSymbol(sym);
@@ -220,9 +363,10 @@ export default function SignalsPage() {
     <div>
       <h1 className="page-title">Signals</h1>
       <p className="page-sub">
-        按 Score 降序 · 表头过滤审查 · 点击行查看详情与历史买卖点
+        仅展示最新行情日的买卖信号 · HOLD/过期预测视为无信号 · 点击行查看详情
       </p>
       {error && <p className="error">{error}</p>}
+      {info && <p className="muted">{info}</p>}
 
       {items.length === 0 ? (
         <div className="panel">
@@ -234,12 +378,42 @@ export default function SignalsPage() {
             <span className="muted">
               显示 {filteredItems.length} / {items.length}
             </span>
-            {active && (
-              <button type="button" className="btn" onClick={() => setFilters(EMPTY_FILTERS)}>
-                清除过滤
+            <div className="btn-row" style={{ margin: 0 }}>
+              {active && (
+                <button type="button" className="btn" onClick={() => setFilters(EMPTY_FILTERS)}>
+                  清除过滤
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn primary"
+                disabled={busy || predicting || items.length === 0}
+                onClick={predictAll}
+                title="对关注列表执行 download→…→predict→signals"
+              >
+                {busy || predicting ? "更新中…" : "更新数据并预测"}
               </button>
-            )}
+              {predicting && (
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={busy}
+                  onClick={cancelPredict}
+                  title="取消排队中/运行中的预测任务"
+                >
+                  取消预测
+                </button>
+              )}
+            </div>
           </div>
+          {predicting && (
+            <p className="muted" style={{ margin: "0 0 0.65rem" }}>
+              预测批量进行中：运行 {predictStats.running} · 排队 {predictStats.queued}
+              {predictStats.failed ? ` · 失败 ${predictStats.failed}` : ""}
+              （worker 并发有限，排队属正常；可点「取消预测」）
+            </p>
+          )}
+          {activePredictJob && <JobProgress job={activePredictJob} />}
           <div className="table-wrap signals-table-wrap">
             <table className="data signals-table">
               <thead>
@@ -374,6 +548,7 @@ export default function SignalsPage() {
                   filteredItems.map((it) => {
                     const score = avgScore(it.algorithms);
                     const vote = normalizeVote(it.vote);
+                    const signal = hasTradeSignal(it);
                     const isActive = symbol === it.symbol;
                     return (
                       <tr
@@ -386,21 +561,30 @@ export default function SignalsPage() {
                         </td>
                         <td className="muted">{it.name || it.exchange || "—"}</td>
                         <td>
-                          <span className={recClass(vote)}>{vote}</span>
+                          {signal ? (
+                            <span className={recClass(vote)}>{vote}</span>
+                          ) : (
+                            <span className="muted">无信号</span>
+                          )}
                         </td>
                         <td className="signals-score">{formatScore(score)}</td>
                         {ALGOS.map((a) => {
                           const rec = it.algorithms?.[a]?.recommendation || "HOLD";
                           const sc = it.algorithms?.[a]?.trade_score;
+                          const algoSignal = rec === "BUY" || rec === "SELL";
                           return (
                             <td key={a} title={sc != null ? String(sc) : ""}>
-                              <span className={recClass(rec)}>{rec}</span>
+                              {algoSignal ? (
+                                <span className={recClass(rec)}>{rec}</span>
+                              ) : (
+                                <span className="muted">—</span>
+                              )}
                             </td>
                           );
                         })}
                         <td>{it.close != null ? Number(it.close).toFixed(2) : "—"}</td>
                         <td className="muted">
-                          {it.signal_timestamp
+                          {signal && it.signal_timestamp
                             ? new Date(it.signal_timestamp).toLocaleString()
                             : "无信号"}
                         </td>
@@ -425,8 +609,12 @@ export default function SignalsPage() {
                 </span>
               </h3>
               <p className="muted" style={{ margin: "0.35rem 0 0" }}>
-                最新投票{" "}
-                <span className={recClass(selected.vote)}>{selected.vote || "—"}</span>
+                最新信号{" "}
+                {hasTradeSignal(selected) ? (
+                  <span className={recClass(selected.vote)}>{selected.vote}</span>
+                ) : (
+                  <span>无信号</span>
+                )}
                 {selected.close != null && <> · 收盘 {Number(selected.close).toFixed(2)}</>}
                 {" · "}
                 共 {data?.total_rows ?? "—"} 行信号
@@ -444,6 +632,14 @@ export default function SignalsPage() {
                 </option>
               ))}
             </select>
+            <button
+              className="btn"
+              disabled={busy || predicting}
+              onClick={() => predictOne(selected.symbol)}
+              title="仅更新并预测当前股票"
+            >
+              更新并预测
+            </button>
             <button className="btn" onClick={() => loadHistory()}>
               刷新
             </button>

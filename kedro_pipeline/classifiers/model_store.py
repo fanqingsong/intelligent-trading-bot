@@ -528,7 +528,16 @@ class ModelStore:
                                  version: str | int | None = None) -> PairPythonModel:
         reg_name = self._reg_name(column_name)
         ver = self._resolve_version(reg_name, alias, version)
-        loaded = mlflow.pyfunc.load_model(f"models:/{reg_name}/{ver}")
+        model_uri = f"models:/{reg_name}/{ver}"
+        try:
+            loaded = mlflow.pyfunc.load_model(model_uri)
+        except MlflowException as exc:
+            raise MlflowException(
+                f"Failed to load '{model_uri}'. Artifact store may be missing "
+                f"(train/predict containers must mount the same volume at /mlruns as the "
+                f"MLflow server). Re-run 更新模型 for symbol={self.symbol}. "
+                f"Underlying error: {exc}"
+            ) from exc
         # Unwrap to our PairPythonModel so callers get predict_df / .pair.
         try:
             return loaded.unwrap_python_model()

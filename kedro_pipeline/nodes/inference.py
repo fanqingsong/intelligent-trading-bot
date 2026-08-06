@@ -371,11 +371,12 @@ def train(matrix_data: pd.DataFrame, config: dict) -> dict:
 def predict(matrix_data: pd.DataFrame, trained_models, config: dict) -> pd.DataFrame:
     """Apply trained models to features and compute prediction scores.
 
-    Mirrors ``pipeline/steps/predict.py``. ``trained_models`` is the in-memory
-    dict from :func:`train` (DAG ordering); the actual models are served by a
-    fresh ``ModelStore`` (loaded from MLflow, so predict also works in a job
-    that did not run train in-process).
+    Mirrors ``pipeline/steps/predict.py``. ``trained_models`` is an optional
+    in-memory dict from :func:`train` (DAG placeholder). Actual model weights
+    come from :class:`ModelStore` / MLflow, so daily-predict jobs that skip
+    ``train`` still work (catalog uses OptionalMemoryDataset).
     """
+    _ = trained_models  # DAG / same-run cache hint only; ModelStore is source of truth
     now = datetime.now()
     time_column = config["time_column"]
 

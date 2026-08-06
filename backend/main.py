@@ -226,10 +226,10 @@ async def watchlist_list(
     ),
 ):
     from backend.watchlist_service import (
+        board_signals,
         enrich_items_with_job_progress,
         list_items,
         refresh_running_statuses,
-        symbol_signals,
     )
 
     await refresh_running_statuses()
@@ -237,12 +237,11 @@ async def watchlist_list(
     if not include_signals:
         return {"items": items}
 
-    # DB reads are sync; run off the event loop and in parallel per symbol.
-    sigs = await asyncio.gather(
-        *[asyncio.to_thread(symbol_signals, item["symbol"]) for item in items]
-    )
+    # One batched DB read for all symbols (avoid N parallel sessions / FD exhaustion).
+    sigs = await asyncio.to_thread(board_signals, [item["symbol"] for item in items])
     enriched = []
-    for item, sig in zip(items, sigs):
+    for item in items:
+        sig = sigs.get(item["symbol"]) or {}
         enriched.append({
             **item,
             "vote": sig.get("vote"),
@@ -250,6 +249,8 @@ async def watchlist_list(
             "signal_available": sig.get("available", False),
             "close": sig.get("close"),
             "signal_timestamp": sig.get("timestamp"),
+            "has_signal": sig.get("has_signal", False),
+            "signal_fresh": sig.get("fresh", False),
         })
     return {"items": enriched}
 
@@ -336,6 +337,24 @@ async def watchlist_train_cancel():
     if batch is None:
         raise HTTPException(404, "No active train batch")
     return {"batch": batch}
+
+
+@app.post("/api/watchlist/predict/cancel")
+async def watchlist_predict_cancel():
+    """Cancel open predict batch / in-flight predict jobs."""
+    from backend.watchlist_service import cancel_open_predict_batch
+
+    batch = await cancel_open_predict_batch()
+    if batch is None:
+        raise HTTPException(404, "No active predict batch")
+    return {"batch": batch}
+
+
+@app.get("/api/watchlist/predict/active")
+def watchlist_predict_active():
+    from backend.watchlist_service import active_predict_batch
+
+    return {"batch": active_predict_batch()}
 
 
 @app.post("/api/watchlist/{symbol}/train")

@@ -46,7 +46,10 @@ raw_sources:
 # Persistence to the MLflow registry happens inside the train/predict_rolling
 # nodes via ModelStore.put_model_pair; predict re-loads from MLflow so a job
 # that skips train still resolves models.
+# OptionalMemoryDataset: daily-predict (no train node) loads {} instead of
+# raising MemoryDataset "has not been saved yet".
 trained_models:
-  type: MemoryDataset
+  type: kedro_pipeline.catalog.datasets.OptionalMemoryDataset
+  default: {}
 
 # === Simulation results (phase 4: append .txt written inside simulate node) ===

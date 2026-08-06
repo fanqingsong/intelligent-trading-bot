@@ -28,9 +28,13 @@ if [ "$exists" != "1" ]; then
 fi
 
 echo "Starting MLflow with backend ${BACKEND_URI%%@*}@${PGHOST}:5432/${PGDATABASE}"
+# --serve-artifacts: clients upload/download via the tracking server instead of
+# needing a local filesystem path that matches the server's absolute /mlruns.
 exec mlflow server \
   --backend-store-uri "$BACKEND_URI" \
   --default-artifact-root "$ARTIFACT_ROOT" \
+  --serve-artifacts \
+  --artifacts-destination "$ARTIFACT_ROOT" \
   --host 0.0.0.0 \
   --port 5000 \
   --allowed-hosts '*'

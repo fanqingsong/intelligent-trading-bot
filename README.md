@@ -14,14 +14,14 @@ ML-based analysis for **China A-shares (沪深)**：Watchlist 日常信号 + 手
 ## Quick start
 
 ```bash
-bin/start_dev.sh
+bin/start_dev.sh          # 依赖未变时跳过镜像重建
+bin/start_dev.sh --build  # 强制重建镜像
 ```
 
 - Web UI: http://localhost:5174
 - API docs: http://localhost:8000/docs
 - MLflow UI: http://localhost:5000
-- Kedro-Viz: http://localhost:4141
-- Postgres: `localhost:5432` (user/pass/db: `itb` / `itb` / `itb`)
+- Postgres: `localhost:5433` (user/pass/db: `itb` / `itb` / `itb`)
 - Default config template: `configs/config-ashare-1d.jsonc`（首次启动复制为 `config-dev.jsonc`）
 
 Optional — migrate existing CSV under `./data` into Postgres:
@@ -76,7 +76,6 @@ Stop with `bin/stop_dev.sh`.
 | prefect-server | 4200 | Prefect UI + durable queue |
 | prefect-worker | — | Serves Kedro jobs + daily-predict cron |
 | mlflow | 5000 | Model Registry + tracking UI |
-| viz | 4141 | Kedro-Viz pipeline DAG UI |
 | redis | 6379 | Job state/logs mirror for SSE UI |
 | postgres | 5432 | Watchlist + market_frames |
 

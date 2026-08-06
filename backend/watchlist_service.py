@@ -20,7 +20,7 @@ from shared import (
     symbol_config_overrides,
 )
 from shared.db.engine import get_session_factory
-from shared.db.frames import frame_exists, load_frame_tail
+from shared.db.frames import frame_exists, load_frame_tail, load_latest_frames
 from backend.db.models import BatchRun, SymbolRunLink, WatchlistItem
 
 PIPELINE_URL = os.environ.get("PIPELINE_URL", "http://localhost:8001")
@@ -415,6 +415,98 @@ async def cancel_open_train_batch() -> dict[str, Any] | None:
             _maybe_finish_batch(session, batch_id)
         session.commit()
         return _batch_progress(session, batch_id)
+
+
+def find_open_predict_batch_id() -> int | None:
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        batch = session.scalars(
+            select(BatchRun)
+            .where(BatchRun.kind == "predict", BatchRun.status.in_(("queued", "running")))
+            .order_by(BatchRun.id.desc())
+        ).first()
+        return batch.id if batch else None
+
+
+def active_predict_batch() -> dict[str, Any] | None:
+    batch_id = find_open_predict_batch_id()
+    if batch_id is None:
+        return None
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        progress = _batch_progress(session, batch_id)
+        progress["steps"] = list(DAILY_PREDICT_STEPS)
+        return progress
+
+
+async def cancel_open_predict_batch() -> dict[str, Any] | None:
+    """Cancel open predict batch and any orphaned queued/running predict jobs."""
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        batch_id = find_open_predict_batch_id()
+        job_ids: list[str] = []
+        link_ids: list[int] = []
+        if batch_id is not None:
+            links = list(
+                session.scalars(
+                    select(SymbolRunLink).where(
+                        SymbolRunLink.batch_id == batch_id,
+                        SymbolRunLink.status.in_(("queued", "running")),
+                    )
+                ).all()
+            )
+            job_ids = [link.job_id for link in links if link.job_id]
+            link_ids = [link.id for link in links]
+
+        for item in session.scalars(
+            select(WatchlistItem).where(WatchlistItem.predict_status.in_(("queued", "running")))
+        ).all():
+            if item.last_predict_job_id and item.last_predict_job_id not in job_ids:
+                job_ids.append(item.last_predict_job_id)
+
+        if batch_id is None and not job_ids:
+            return None
+
+    for job_id in job_ids:
+        await _cancel_pipeline_job(job_id)
+
+    with SessionLocal() as session:
+        for link_id in link_ids:
+            link = session.get(SymbolRunLink, link_id)
+            if not link or link.status in _TERMINAL_LINK:
+                continue
+            link.status = "skipped"
+            link.error = "cancelled by user"
+        for item in session.scalars(
+            select(WatchlistItem).where(WatchlistItem.predict_status.in_(("queued", "running")))
+        ).all():
+            item.predict_status = "idle"
+            item.last_error = "cancelled by user"
+        if batch_id is not None:
+            batch = session.get(BatchRun, batch_id)
+            if batch and batch.status in ("queued", "running"):
+                note = batch.note or ""
+                if "cancelled by user" not in note:
+                    batch.note = (note + "\ncancelled by user").strip()[:2000]
+                _maybe_finish_batch(session, batch_id)
+        session.commit()
+        if batch_id is not None:
+            progress = _batch_progress(session, batch_id)
+            progress["steps"] = list(DAILY_PREDICT_STEPS)
+            return progress
+        return {
+            "batch_id": None,
+            "kind": "predict",
+            "status": "cancelled",
+            "total": 0,
+            "queued": 0,
+            "running": 0,
+            "completed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "current_symbol": "",
+            "steps": list(DAILY_PREDICT_STEPS),
+        }
 
 
 async def cancel_train_symbol(symbol: str) -> dict[str, Any]:
@@ -822,22 +914,66 @@ def _algo_recommendation(row: pd.Series, algo: str) -> str:
     return "HOLD"
 
 
-def symbol_signals(symbol: str) -> dict[str, Any]:
-    # Board only needs the latest row — avoid loading the full signals history.
-    df = load_frame_tail(symbol, "signals", n=1)
-    summary: dict[str, Any] = {
+def _frame_day(df: pd.DataFrame, time_column: str = "timestamp"):
+    """Calendar day of the last row, or None."""
+    if df.empty or time_column not in df.columns:
+        return None
+    ts = pd.Timestamp(df.iloc[-1][time_column])
+    if pd.isna(ts):
+        return None
+    return ts.date()
+
+
+def _row_vote(row: pd.Series, columns) -> str:
+    vote = str(row.get("vote_label") or "HOLD") if "vote_label" in columns else "HOLD"
+    if vote in ("BUY", "SELL", "HOLD"):
+        return vote
+    buy = bool(row.get("buy_signal_vote", False)) if "buy_signal_vote" in columns else False
+    sell = bool(row.get("sell_signal_vote", False)) if "sell_signal_vote" in columns else False
+    if buy and not sell:
+        return "BUY"
+    if sell and not buy:
+        return "SELL"
+    return "HOLD"
+
+
+def _empty_signal_summary(symbol: str) -> dict[str, Any]:
+    return {
         "symbol": symbol,
         "available": False,
         "latest": None,
         "recommendation": "HOLD",
         "algorithms": {},
         "vote": "HOLD",
+        "fresh": False,
+        "has_signal": False,
+        "timestamp": None,
+        "close": None,
     }
+
+
+def _summarize_signal_frames(
+    symbol: str,
+    df: pd.DataFrame,
+    klines: pd.DataFrame,
+) -> dict[str, Any]:
+    """Build board summary from already-loaded latest signal/kline frames."""
+    summary = _empty_signal_summary(symbol)
+
+    close = None
+    if not klines.empty and "close" in klines.columns and pd.notna(klines.iloc[-1].get("close")):
+        close = float(klines.iloc[-1]["close"])
+
     if df.empty:
+        if close is not None:
+            summary["close"] = close
         return summary
 
     row = df.iloc[-1]
     latest = json.loads(pd.DataFrame([row]).to_json(orient="records", date_format="iso"))[0]
+    if close is None and "close" in df.columns and pd.notna(row.get("close")):
+        close = float(row["close"])
+
     algos: dict[str, Any] = {}
     for algo in ALGOS:
         score_col = f"trade_score_{algo}"
@@ -854,27 +990,61 @@ def symbol_signals(symbol: str) -> dict[str, Any]:
             "trade_score": score,
         }
 
-    vote = str(row.get("vote_label") or "HOLD") if "vote_label" in df.columns else "HOLD"
-    if vote not in ("BUY", "SELL", "HOLD"):
-        buy = bool(row.get("buy_signal_vote", False)) if "buy_signal_vote" in df.columns else False
-        sell = bool(row.get("sell_signal_vote", False)) if "sell_signal_vote" in df.columns else False
-        if buy and not sell:
-            vote = "BUY"
-        elif sell and not buy:
-            vote = "SELL"
-        else:
-            vote = "HOLD"
+    vote = _row_vote(row, df.columns)
+    signal_day = _frame_day(df)
+    kline_day = _frame_day(klines)
+    # No klines yet → treat signals as the latest market view.
+    fresh = kline_day is None or signal_day == kline_day
+    if not fresh:
+        # Stale prediction must not look like a live BUY/SELL on the board.
+        vote = "HOLD"
+        for algo in algos.values():
+            algo["recommendation"] = "HOLD"
 
+    has_signal = fresh and vote in ("BUY", "SELL")
     summary.update({
         "available": True,
         "latest": latest,
         "algorithms": algos,
         "vote": vote,
         "recommendation": vote,
-        "close": float(row["close"]) if "close" in df.columns and pd.notna(row.get("close")) else None,
-        "timestamp": latest.get("timestamp"),
+        "close": close,
+        "fresh": fresh,
+        "has_signal": has_signal,
+        # Only actionable signals expose a timestamp; HOLD/stale → UI「无信号」.
+        "timestamp": latest.get("timestamp") if has_signal else None,
     })
     return summary
+
+
+def symbol_signals(symbol: str) -> dict[str, Any]:
+    """Latest board summary for one symbol.
+
+    Board semantics:
+    - ``close`` comes from the latest kline when available (else signals).
+    - A trade signal (BUY/SELL) is only reported when signals are aligned with the
+      latest kline day. HOLD or stale predictions → no ``timestamp`` (UI: 无信号).
+    """
+    df = load_frame_tail(symbol, "signals", n=1)
+    klines = load_frame_tail(symbol, "klines", n=1)
+    return _summarize_signal_frames(symbol, df, klines)
+
+
+def board_signals(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Batch board summaries for many symbols (one DB round-trip)."""
+    symbols = [str(s).strip() for s in symbols if str(s).strip()]
+    if not symbols:
+        return {}
+    latest = load_latest_frames(symbols, ["signals", "klines"])
+    empty = pd.DataFrame()
+    return {
+        sym: _summarize_signal_frames(
+            sym,
+            latest.get((sym, "signals"), empty),
+            latest.get((sym, "klines"), empty),
+        )
+        for sym in symbols
+    }
 
 
 def sync_job_status(symbol: str, job_id: str, kind: str, status: str, error: str = "") -> None:
@@ -1013,19 +1183,26 @@ async def refresh_running_statuses() -> None:
             kind = batch.kind if batch and batch.kind in ("train", "predict") else "predict"
             link_snapshot.append((link.symbol, link.job_id, kind))
 
-    pending: list[tuple[str, str, str]] = []  # (symbol, job_id, kind)
+    # Deduplicate by job_id — large watchlists otherwise fan out hundreds of HTTP calls.
+    by_job: dict[str, tuple[str, str, str]] = {}
     for symbol, train_status, train_job, predict_status, predict_job in snapshot:
         if train_status in ("running", "queued") and train_job:
-            pending.append((symbol, train_job, "train"))
+            by_job[train_job] = (symbol, train_job, "train")
         if predict_status in ("running", "queued") and predict_job:
-            pending.append((symbol, predict_job, "predict"))
-    pending.extend(link_snapshot)
+            by_job[predict_job] = (symbol, predict_job, "predict")
+    for symbol, job_id, kind in link_snapshot:
+        by_job.setdefault(job_id, (symbol, job_id, kind))
+    pending = list(by_job.values())
 
     if pending:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            results = await asyncio.gather(
-                *[_fetch_job(job_id, client=client) for _, job_id, _ in pending]
-            )
+        sem = asyncio.Semaphore(8)
+
+        async def _limited(job_id: str, client: httpx.AsyncClient):
+            async with sem:
+                return await _fetch_job(job_id, client=client)
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            results = await asyncio.gather(*[_limited(job_id, client) for _, job_id, _ in pending])
         for (symbol, job_id, kind), data in zip(pending, results):
             if not data:
                 continue
@@ -1041,34 +1218,52 @@ async def refresh_running_statuses() -> None:
 async def enrich_items_with_job_progress(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Attach live Redis/pipeline progress for queued/running train & predict jobs."""
     need: list[tuple[int, str, str]] = []  # (index, kind, job_id)
+    seen_jobs: set[str] = set()
     for idx, item in enumerate(items):
         if item.get("train_status") in ("running", "queued") and item.get("last_train_job_id"):
-            need.append((idx, "train", item["last_train_job_id"]))
+            jid = item["last_train_job_id"]
+            if jid not in seen_jobs:
+                seen_jobs.add(jid)
+                need.append((idx, "train", jid))
         if item.get("predict_status") in ("running", "queued") and item.get("last_predict_job_id"):
-            need.append((idx, "predict", item["last_predict_job_id"]))
+            jid = item["last_predict_job_id"]
+            if jid not in seen_jobs:
+                seen_jobs.add(jid)
+                need.append((idx, "predict", jid))
 
     if not need:
         return items
 
     out = [dict(item) for item in items]
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        results = await asyncio.gather(
-            *[_fetch_job(job_id, client=client) for _, _, job_id in need]
-        )
-    for (idx, kind, _), data in zip(need, results):
-        if not data:
-            continue
-        payload = _job_progress_payload(kind, data)
-        if kind == "train":
-            out[idx]["train_job"] = payload
-            # Convenience alias for the active train UI.
-            if out[idx].get("train_status") in ("running", "queued"):
-                out[idx]["job_progress"] = payload
-        else:
-            out[idx]["predict_job"] = payload
-            if (
-                out[idx].get("predict_status") in ("running", "queued")
-                and out[idx].get("train_status") not in ("running", "queued")
-            ):
-                out[idx]["job_progress"] = payload
+    sem = asyncio.Semaphore(8)
+
+    async def _limited(job_id: str, client: httpx.AsyncClient):
+        async with sem:
+            return await _fetch_job(job_id, client=client)
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        results = await asyncio.gather(*[_limited(job_id, client) for _, _, job_id in need])
+    job_data = {job_id: data for (_, _, job_id), data in zip(need, results)}
+
+    # Re-attach by scanning items so duplicate job_ids still get progress payloads.
+    for idx, item in enumerate(out):
+        for kind, key in (("train", "last_train_job_id"), ("predict", "last_predict_job_id")):
+            if item.get(f"{kind}_status") not in ("running", "queued"):
+                continue
+            jid = item.get(key)
+            data = job_data.get(jid) if jid else None
+            if not data:
+                continue
+            payload = _job_progress_payload(kind, data)
+            if kind == "train":
+                out[idx]["train_job"] = payload
+                if out[idx].get("train_status") in ("running", "queued"):
+                    out[idx]["job_progress"] = payload
+            else:
+                out[idx]["predict_job"] = payload
+                if (
+                    out[idx].get("predict_status") in ("running", "queued")
+                    and out[idx].get("train_status") not in ("running", "queued")
+                ):
+                    out[idx]["job_progress"] = payload
     return out

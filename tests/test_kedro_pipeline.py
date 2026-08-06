@@ -28,3 +28,28 @@ def test_backtest_nodes_importable():
 
     assert callable(predict_rolling)
     assert callable(simulate)
+
+
+def test_optional_memory_dataset_loads_default_when_empty():
+    from kedro_pipeline.catalog.datasets import OptionalMemoryDataset
+
+    ds = OptionalMemoryDataset(default={})
+    assert ds.exists()
+    assert ds.load() == {}
+    ds.save({"a": 1})
+    assert ds.load() == {"a": 1}
+
+
+def test_daily_predict_nodes_include_predict_without_train():
+    """Daily predict skips train; predict must still be runnable via catalog."""
+    from shared import DAILY_PREDICT_STEPS
+    from kedro_pipeline.pipeline_registry import register_pipelines
+
+    assert "train" not in DAILY_PREDICT_STEPS
+    assert "predict" in DAILY_PREDICT_STEPS
+    pipe = register_pipelines()["inference"].only_nodes(*DAILY_PREDICT_STEPS)
+    names = [n.name for n in pipe.nodes]
+    assert "predict" in names
+    assert "train" not in names
+    predict_node = next(n for n in pipe.nodes if n.name == "predict")
+    assert "trained_models" in predict_node.inputs

@@ -162,6 +162,34 @@ def load_frame_tail(
     return _rows_to_frame(list(reversed(rows)), time_column)
 
 
+def load_latest_frames(
+    symbols: list[str],
+    kinds: list[str],
+    time_column: str = "timestamp",
+) -> dict[tuple[str, str], pd.DataFrame]:
+    """Latest row per (symbol, kind) in one query. Missing pairs are omitted."""
+    symbols = [str(s).strip() for s in symbols if str(s).strip()]
+    kinds = [normalize_kind(k) for k in kinds]
+    if not symbols or not kinds:
+        return {}
+
+    # DISTINCT ON needs the leading ORDER BY columns to match.
+    stmt = (
+        select(MarketFrame)
+        .where(MarketFrame.symbol.in_(symbols), MarketFrame.kind.in_(kinds))
+        .distinct(MarketFrame.symbol, MarketFrame.kind)
+        .order_by(MarketFrame.symbol, MarketFrame.kind, MarketFrame.ts.desc())
+    )
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        rows = list(session.scalars(stmt).all())
+
+    out: dict[tuple[str, str], pd.DataFrame] = {}
+    for row in rows:
+        out[(row.symbol, row.kind)] = _rows_to_frame([row], time_column)
+    return out
+
+
 def frame_row_count(symbol: str, kind: str) -> int:
     kind = normalize_kind(kind)
     SessionLocal = get_session_factory()

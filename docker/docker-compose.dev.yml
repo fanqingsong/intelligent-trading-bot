@@ -47,7 +47,8 @@ services:
       - ..:/app
       - ../data:/app/data
       - ../configs:/app/configs
-      - mlflow_artifacts:/app/data/mlruns
+      # Must match mlflow service path (/mlruns); artifact_uri is absolute /mlruns/<exp>/...
+      - mlflow_artifacts:/mlruns
     depends_on:
       redis:
         condition: service_started
@@ -82,7 +83,7 @@ services:
       - ..:/app
       - ../data:/app/data
       - ../configs:/app/configs
-      - mlflow_artifacts:/app/data/mlruns
+      - mlflow_artifacts:/mlruns
     depends_on:
       redis:
         condition: service_started
@@ -154,7 +155,7 @@ services:
       - ../data:/app/data
       - ../configs:/app/configs
       - ../conf:/app/conf
-      - mlflow_artifacts:/app/data/mlruns
+      - mlflow_artifacts:/mlruns
     depends_on:
       redis:
         condition: service_started
@@ -207,27 +208,6 @@ services:
       - api
     # entrypoint: frontend/docker-entrypoint.sh (sync deps, then exec CMD)
     command: npm run dev -- --host 0.0.0.0 --port 5173
-
-  # Kedro-Viz: pipeline DAG browser (reuses pipeline image; needs node imports)
-  viz:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.pipeline
-    ports:
-      - "4141:4141"
-    environment:
-      - PYTHONPATH=/app
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-    volumes:
-      - ..:/app
-      - ../data:/app/data
-      - ../configs:/app/configs
-      - ../conf:/app/conf
-    working_dir: /app
-    command: >
-      kedro viz run
-      --host 0.0.0.0 --port 4141
-      --no-browser --autoreload
 
 volumes:
   redis_data:

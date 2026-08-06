@@ -77,7 +77,7 @@ export const api = {
     request("/api/config", { method: "PUT", body: JSON.stringify({ content }) }),
   watchlist: (opts?: { includeSignals?: boolean }) => {
     const q = opts?.includeSignals === false ? "?include_signals=false" : "";
-    return request<{ items: any[] }>(`/api/watchlist${q}`);
+    return request<{ items: any[] }>(`/api/watchlist${q}`, { timeoutMs: 60_000 });
   },
   watchlistSuggest: (q: string, limit = 15) =>
     request<{ query: string; items: { code: string; name: string; exchange: string; label: string }[] }>(
@@ -167,6 +167,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ symbols: symbols ?? null, team: team ?? null }),
     }),
+  watchlistPredictCancel: () =>
+    request<{
+      batch: {
+        batch_id: number | null;
+        status: string;
+        total: number;
+        queued: number;
+        running: number;
+        completed: number;
+        failed: number;
+        skipped: number;
+        current_symbol: string;
+      };
+    }>("/api/watchlist/predict/cancel", { method: "POST" }),
   watchlistSignals: (symbol: string) =>
     request<any>(`/api/watchlist/${encodeURIComponent(symbol)}/signals`),
   getSchedule: () => request<any>("/api/schedule"),
