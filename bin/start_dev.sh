@@ -68,6 +68,10 @@ elif ! docker compose -f "${COMPOSE_FILE}" images -q 2>/dev/null | grep -q .; th
   echo "Project images missing; building..."
 fi
 
+# BuildKit enables Dockerfile cache mounts (pip wheel cache across rebuilds).
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+
 echo "Starting intelligent-trading-bot microservices (dev, hot-reload)..."
 if [[ "${NEED_BUILD}" -eq 1 ]]; then
   docker compose -f "${COMPOSE_FILE}" up -d --build

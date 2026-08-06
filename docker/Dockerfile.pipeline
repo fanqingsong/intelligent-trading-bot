@@ -1,3 +1,4 @@
+# syntax=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/docker/dockerfile:1
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.12-slim
 
 WORKDIR /app
@@ -9,14 +10,18 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
-ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
+# Huawei PyPI: much faster for large wheels (tensorflow ~620MB) than Aliyun in CN.
+ENV PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple
+ENV PIP_TRUSTED_HOST=repo.huaweicloud.com
+ENV PIP_DEFAULT_TIMEOUT=120
 
 # Install deps before copying app source so code edits do not bust this cache.
 # ta-lib 0.6+ ships manylinux wheels (no local C library compile)
+# BuildKit pip cache avoids re-downloading tensorflow on rebuilds.
 COPY requirements-services.txt requirements-ml.txt ./
-RUN pip install --no-cache-dir -r requirements-services.txt \
-    && pip install --no-cache-dir -r requirements-ml.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements-services.txt \
+    && pip install -r requirements-ml.txt
 
 COPY pyproject.toml README.md LICENSE ./
 COPY shared ./shared
@@ -24,7 +29,8 @@ COPY backend ./backend
 COPY kedro_pipeline ./kedro_pipeline
 COPY conf ./conf
 # Metadata only; site-packages deps already installed above.
-RUN pip install --no-cache-dir -e . --no-deps
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -e . --no-deps
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
