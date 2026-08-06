@@ -79,14 +79,24 @@ TRAIN_UPDATE_STEPS = [
     "signals",
 ]
 
-# Daily / scheduled inference: skip train, reuse MLflow models.
-DAILY_PREDICT_STEPS = [
+# Refresh market data only (no inference).
+DATA_UPDATE_STEPS = [
     "download",
+]
+
+# Inference without re-download (reuse existing klines).
+INFER_STEPS = [
     "merge",
     "features",
     "labels",
     "predict",
     "signals",
+]
+
+# Daily / scheduled inference: download + infer, skip train, reuse MLflow models.
+DAILY_PREDICT_STEPS = [
+    *DATA_UPDATE_STEPS,
+    *INFER_STEPS,
 ]
 
 BACKTEST_STEPS = [

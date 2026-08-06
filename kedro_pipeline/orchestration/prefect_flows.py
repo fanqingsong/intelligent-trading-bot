@@ -46,22 +46,37 @@ def kedro_job_flow(
     team = normalize_team(team)
     kind = job_kind(steps, overrides)
     is_train = kind == "train"
+    batch_mode = str(overrides.get("batch_mode") or "").strip().lower()
+    batch_symbols = overrides.get("batch_symbols")
+    is_batch = bool(batch_mode and batch_symbols)
     ensure_concurrency_limits(extra_symbol=symbol)
     names = concurrency_names_for_job(symbol, is_train=is_train)
     lease = float(os.environ.get("ITB_PREFECT_LEASE_SECONDS", "3600"))
     fine = _use_fine_execution()
     logger.info(
-        "Starting Kedro job %s symbol=%s team=%s kind=%s fine=%s slots=%s steps=%s",
+        "Starting Kedro job %s symbol=%s team=%s kind=%s fine=%s batch=%s slots=%s steps=%s",
         job_id,
         symbol,
         team,
         kind,
         fine,
+        batch_mode or "-",
         names,
         steps,
     )
     with concurrency(names, occupy=1, timeout_seconds=None, lease_duration=lease):
-        if fine:
+        if is_batch:
+            from kedro_pipeline.orchestration.batch_runner import execute_batch_job
+
+            execute_batch_job(
+                job_id,
+                config_path,
+                overrides,
+                team=team,
+                tags=tags,
+                fine=fine,
+            )
+        elif fine:
             from kedro_pipeline.orchestration.prefect_bridge import execute_job_fine
 
             execute_job_fine(
@@ -88,7 +103,7 @@ def daily_predict_flow(note: str = "scheduled", team: str | None = None) -> dict
     logger.info("Daily predict batch starting note=%s team=%s", note, team)
     from backend.watchlist_service import predict_symbols
 
-    result = asyncio.run(predict_symbols(note=note, team=team))
+    result = asyncio.run(predict_symbols(note=note, team=team, mode="full"))
     logger.info(
         "Daily predict enqueued batch=%s jobs=%s skipped=%s",
         result.get("batch_id"),

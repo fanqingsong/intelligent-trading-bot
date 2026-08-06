@@ -73,7 +73,7 @@ def main() -> None:
     except Exception as e:
         log.warning("Concurrency limit upsert failed (continuing): %s", e)
 
-    limit = int(os.environ.get("ITB_PREFECT_SERVE_LIMIT", "2"))
+    limit = int(os.environ.get("ITB_PREFECT_SERVE_LIMIT", "10"))
     cron = os.environ.get("ITB_PREDICT_CRON", "0 16 * * 1-5")
     tz = os.environ.get("ITB_PREDICT_TZ", "Asia/Shanghai")
     predict_enabled = _env_bool("ITB_PREDICT_ENABLED", True)

@@ -107,28 +107,34 @@ def execute_job_fine(
     *,
     team: str = "default",
     tags: list[str] | None = None,
+    finalize: bool = True,
 ) -> None:
-    """Run Kedro nodes as Prefect tasks (topological order), mirroring Redis job state."""
+    """Run Kedro nodes as Prefect tasks (topological order), mirroring Redis job state.
+
+    When ``finalize=False`` (batch segments), do not own job lifecycle / terminal status.
+    """
     if job_was_cancelled(job_id):
         append_log(job_id, "Skip start: job already cancelled")
         return
-    with _jobs_lock:
-        _running_jobs.add(job_id)
-
-    update_job(
-        job_id,
-        status="running",
-        started_at=datetime.now(timezone.utc).isoformat(),
-        current_step="",
-        progress="0",
-        execution="fine",
-        team=team,
-    )
-    append_log(job_id, f"Job {job_id} started (fine-grained). Steps: {steps} team={team}")
-    if tags:
-        append_log(job_id, f"Tags: {tags}")
-    if config_overrides:
-        append_log(job_id, f"Config overrides: {sorted(config_overrides.keys())}")
+    if finalize:
+        with _jobs_lock:
+            _running_jobs.add(job_id)
+        update_job(
+            job_id,
+            status="running",
+            started_at=datetime.now(timezone.utc).isoformat(),
+            current_step="",
+            progress="0",
+            execution="fine",
+            team=team,
+        )
+        append_log(job_id, f"Job {job_id} started (fine-grained). Steps: {steps} team={team}")
+        if tags:
+            append_log(job_id, f"Tags: {tags}")
+        if config_overrides:
+            append_log(job_id, f"Config overrides: {sorted(config_overrides.keys())}")
+    else:
+        append_log(job_id, f"Segment start (fine-grained). Steps: {steps}")
 
     try:
         params = load_params(config_path, config_overrides=config_overrides)
@@ -169,14 +175,17 @@ def execute_job_fine(
         if job_was_cancelled(job_id):
             append_log(job_id, "Job cancelled during run; not marking completed")
             return
-        update_job(
-            job_id,
-            status="completed",
-            current_step="",
-            progress="100",
-            finished_at=datetime.now(timezone.utc).isoformat(),
-        )
-        append_log(job_id, "Job completed successfully (fine-grained).")
+        if finalize:
+            update_job(
+                job_id,
+                status="completed",
+                current_step="",
+                progress="100",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            append_log(job_id, "Job completed successfully (fine-grained).")
+        else:
+            append_log(job_id, "Segment completed successfully (fine-grained).")
     except Exception as e:
         if job_was_cancelled(job_id):
             append_log(job_id, f"Job cancelled (ignoring error): {e}")
@@ -184,15 +193,17 @@ def execute_job_fine(
         tb = traceback.format_exc()
         append_log(job_id, f"ERROR: {e}")
         append_log(job_id, tb)
-        update_job(
-            job_id,
-            status="failed",
-            error=str(e),
-            finished_at=datetime.now(timezone.utc).isoformat(),
-        )
+        if finalize:
+            update_job(
+                job_id,
+                status="failed",
+                error=str(e),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
         raise
     finally:
         clear_job_context()
         _JOB_STATE.pop(job_id, None)
-        with _jobs_lock:
-            _running_jobs.discard(job_id)
+        if finalize:
+            with _jobs_lock:
+                _running_jobs.discard(job_id)

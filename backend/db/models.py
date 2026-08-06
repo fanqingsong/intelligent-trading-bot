@@ -45,7 +45,7 @@ class BatchRun(Base):
     __tablename__ = "batch_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    kind: Mapped[str] = mapped_column(String(32), nullable=False)  # train | predict
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)  # train | predict | download
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

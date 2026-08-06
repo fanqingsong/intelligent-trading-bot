@@ -90,7 +90,7 @@ Frontend can set `VITE_ITB_USER` / `VITE_ITB_TEAMS` / `VITE_ITB_ADMIN`.
 | Limit | Default | Meaning |
 |-------|---------|---------|
 | `itb-train` | `ITB_TRAIN_CONCURRENCY=1` | Max concurrent train jobs |
-| `itb-predict` | `ITB_PREDICT_CONCURRENCY=2` | Max concurrent predict jobs |
+| `itb-predict` | `ITB_PREDICT_CONCURRENCY=10` | Max concurrent predict jobs |
 | `itb-symbol:{code}` | `1` | Same symbol never overlaps |
 
 ## Config cheat-sheet

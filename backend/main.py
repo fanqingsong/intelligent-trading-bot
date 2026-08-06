@@ -19,6 +19,8 @@ from shared import (
     ALL_STEPS,
     BACKTEST_STEPS,
     DAILY_PREDICT_STEPS,
+    DATA_UPDATE_STEPS,
+    INFER_STEPS,
     PACKAGE_ROOT,
     PIPELINE_STEPS,
     TRAIN_UPDATE_STEPS,
@@ -188,6 +190,8 @@ class WatchlistImportRequest(BaseModel):
 class PredictRequest(BaseModel):
     symbols: list[str] | None = None
     team: str | None = None
+    # data = download only; predict = infer without download; full = download+infer
+    mode: str | None = Field(default="predict", pattern="^(data|predict|full)$")
 
 
 class TrainAllRequest(BaseModel):
@@ -299,7 +303,9 @@ async def watchlist_predict(
     body = req or PredictRequest()
     require_team(caller, body.team)
     try:
-        return await predict_symbols(symbols=body.symbols, note="manual", team=body.team)
+        return await predict_symbols(
+            symbols=body.symbols, note="manual", team=body.team, mode=body.mode or "predict"
+        )
     except Exception as e:
         raise HTTPException(503, str(e)) from e
 
@@ -428,6 +434,8 @@ def pipeline_steps():
     return {
         "pipeline": PIPELINE_STEPS,
         "train_update": TRAIN_UPDATE_STEPS,
+        "data_update": DATA_UPDATE_STEPS,
+        "infer": INFER_STEPS,
         "daily_predict": DAILY_PREDICT_STEPS,
         "backtest": BACKTEST_STEPS,
         "all": ALL_STEPS,

@@ -16,7 +16,7 @@ def _train_limit() -> int:
 
 
 def _predict_limit() -> int:
-    return max(1, int(os.environ.get("ITB_PREDICT_CONCURRENCY", "2")))
+    return max(1, int(os.environ.get("ITB_PREDICT_CONCURRENCY", "10")))
 
 
 def symbol_limit_name(symbol: str) -> str:

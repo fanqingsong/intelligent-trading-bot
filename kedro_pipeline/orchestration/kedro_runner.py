@@ -164,22 +164,27 @@ def execute_job(
     steps: list[str],
     config_path: str,
     config_overrides: dict | None = None,
+    *,
+    finalize: bool = True,
 ) -> None:
     if job_was_cancelled(job_id):
         append_log(job_id, "Skip start: job already cancelled")
         return
-    with _jobs_lock:
-        _running_jobs.add(job_id)
-    update_job(
-        job_id,
-        status="running",
-        started_at=datetime.now(timezone.utc).isoformat(),
-        current_step="",
-        progress="0",
-    )
-    append_log(job_id, f"Job {job_id} started. Steps: {steps}")
-    if config_overrides:
-        append_log(job_id, f"Config overrides: {sorted(config_overrides.keys())}")
+    if finalize:
+        with _jobs_lock:
+            _running_jobs.add(job_id)
+        update_job(
+            job_id,
+            status="running",
+            started_at=datetime.now(timezone.utc).isoformat(),
+            current_step="",
+            progress="0",
+        )
+        append_log(job_id, f"Job {job_id} started. Steps: {steps}")
+        if config_overrides:
+            append_log(job_id, f"Config overrides: {sorted(config_overrides.keys())}")
+    else:
+        append_log(job_id, f"Segment start. Steps: {steps}")
 
     try:
         params = load_params(config_path, config_overrides=config_overrides)
@@ -210,14 +215,17 @@ def execute_job(
         if job_was_cancelled(job_id):
             append_log(job_id, "Job cancelled during run; not marking completed")
             return
-        update_job(
-            job_id,
-            status="completed",
-            current_step="",
-            progress="100",
-            finished_at=datetime.now(timezone.utc).isoformat(),
-        )
-        append_log(job_id, "Job completed successfully.")
+        if finalize:
+            update_job(
+                job_id,
+                status="completed",
+                current_step="",
+                progress="100",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            append_log(job_id, "Job completed successfully.")
+        else:
+            append_log(job_id, "Segment completed successfully.")
     except Exception as e:
         if job_was_cancelled(job_id):
             append_log(job_id, f"Job cancelled (ignoring error): {e}")
@@ -225,13 +233,15 @@ def execute_job(
         tb = traceback.format_exc()
         append_log(job_id, f"ERROR: {e}")
         append_log(job_id, tb)
-        update_job(
-            job_id,
-            status="failed",
-            error=str(e),
-            finished_at=datetime.now(timezone.utc).isoformat(),
-        )
+        if finalize:
+            update_job(
+                job_id,
+                status="failed",
+                error=str(e),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
         raise
     finally:
-        with _jobs_lock:
-            _running_jobs.discard(job_id)
+        if finalize:
+            with _jobs_lock:
+                _running_jobs.discard(job_id)

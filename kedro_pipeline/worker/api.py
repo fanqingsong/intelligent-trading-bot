@@ -156,7 +156,19 @@ def create_job(req: JobRequest, background_tasks: BackgroundTasks):
         else:
             append_log(job_id, f"Enqueued Prefect deployment run team={team}")
     else:
-        background_tasks.add_task(execute_job, job_id, req.steps, config_path, overrides)
+        batch_mode = str(overrides.get("batch_mode") or "").strip().lower()
+        if batch_mode and overrides.get("batch_symbols"):
+            from kedro_pipeline.orchestration.batch_runner import execute_batch_job
+
+            background_tasks.add_task(
+                execute_batch_job,
+                job_id,
+                config_path,
+                overrides,
+                team=team,
+            )
+        else:
+            background_tasks.add_task(execute_job, job_id, req.steps, config_path, overrides)
 
     return JobResponse(
         job_id=job_id,

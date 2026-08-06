@@ -162,10 +162,21 @@ export const api = {
       cancelled: boolean;
       message?: string;
     }>(`/api/watchlist/${encodeURIComponent(symbol)}/train/cancel`, { method: "POST" }),
-  watchlistPredict: (symbols?: string[], team?: string) =>
-    request<{ batch_id: number; jobs: JobRef[]; skipped: any[] }>("/api/watchlist/predict", {
+  watchlistPredict: (
+    symbols?: string[],
+    team?: string,
+    mode: "data" | "predict" | "full" = "predict",
+  ) =>
+    request<{
+      batch_id: number;
+      jobs: JobRef[];
+      skipped: any[];
+      mode?: string;
+      kind?: string;
+      batched?: boolean;
+    }>("/api/watchlist/predict", {
       method: "POST",
-      body: JSON.stringify({ symbols: symbols ?? null, team: team ?? null }),
+      body: JSON.stringify({ symbols: symbols ?? null, team: team ?? null, mode }),
     }),
   watchlistPredictCancel: () =>
     request<{
@@ -193,6 +204,8 @@ export const api = {
     request<{
       pipeline: string[];
       train_update: string[];
+      data_update: string[];
+      infer: string[];
       daily_predict: string[];
       backtest: string[];
       all: string[];

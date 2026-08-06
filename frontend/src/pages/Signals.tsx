@@ -210,6 +210,11 @@ export default function SignalsPage() {
     return best;
   }, [items]);
 
+  const activeBatchLabel = useMemo(() => {
+    if (activePredictJob?.kind === "download") return "数据更新";
+    return "预测";
+  }, [activePredictJob]);
+
   const loadBoard = useCallback(async () => {
     try {
       const r = await api.watchlist();
@@ -238,47 +243,49 @@ export default function SignalsPage() {
     [symbol],
   );
 
-  const predictAll = useCallback(async () => {
-    setBusy(true);
-    setError("");
-    setInfo("");
-    try {
-      const res = await api.watchlistPredict();
-      await loadBoard();
-      const nJobs = (res.jobs || []).length;
-      const skipped = res.skipped || [];
-      if (nJobs) {
-        setInfo(`已提交 ${nJobs} 只股票的数据更新与预测（含 download→signals）`);
-      }
-      if (skipped.length) {
-        const syms = skipped.map((s: any) => s.symbol).join(", ");
-        setError(
-          nJobs
-            ? `部分跳过（需先训练）：${syms}`
-            : `全部跳过（需先到 Models 更新模型）：${syms}`,
-        );
-      }
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setBusy(false);
-    }
-  }, [loadBoard]);
-
-  const predictOne = useCallback(
-    async (sym: string) => {
-      if (!sym) return;
+  const runWatchlistJobs = useCallback(
+    async (mode: "data" | "predict", symbols?: string[]) => {
       setBusy(true);
       setError("");
       setInfo("");
       try {
-        const res = await api.watchlistPredict([sym]);
+        const res = await api.watchlistPredict(symbols, undefined, mode);
         await loadBoard();
-        await loadHistory(sym);
-        if ((res.jobs || []).length) {
-          setInfo(`${sym}：已提交数据更新与预测`);
-        } else if ((res.skipped || []).length) {
-          setError(`${sym}：未训练，请先到 Models 更新模型`);
+        if (symbols?.length === 1) {
+          await loadHistory(symbols[0]);
+        }
+        const nJobs = (res.jobs || []).length;
+        const skipped = res.skipped || [];
+        const label = mode === "data" ? "数据更新" : "预测";
+        const scope = symbols?.length === 1 ? `${symbols[0]}：` : "";
+        const batched = Boolean(res.batched) || (res.jobs || []).some((j: any) => j.batch);
+        if (nJobs) {
+          if (symbols?.length === 1) {
+            setInfo(`${scope}已提交${label}`);
+          } else if (batched) {
+            const nSyms = (res.jobs || []).find((j: any) => j.batch)?.symbols?.length;
+            setInfo(
+              nSyms
+                ? `已提交批量${label}（1 个任务 · ${nSyms} 只股票）`
+                : `已提交批量${label}（1 个任务）`,
+            );
+          } else {
+            setInfo(`已提交 ${nJobs} 只股票的${label}`);
+          }
+        }
+        if (skipped.length) {
+          const syms = skipped.map((s: any) => s.symbol).join(", ");
+          if (mode === "data") {
+            setError(nJobs ? `部分失败：${syms}` : `全部失败：${syms}`);
+          } else {
+            setError(
+              nJobs
+                ? `部分跳过（需先训练）：${syms}`
+                : symbols?.length === 1
+                  ? `${symbols[0]}：未训练，请先到 Models 更新模型`
+                  : `全部跳过（需先到 Models 更新模型）：${syms}`,
+            );
+          }
         }
       } catch (e: any) {
         setError(String(e.message || e));
@@ -289,13 +296,30 @@ export default function SignalsPage() {
     [loadBoard, loadHistory],
   );
 
+  const updateDataAll = useCallback(() => runWatchlistJobs("data"), [runWatchlistJobs]);
+  const predictAll = useCallback(() => runWatchlistJobs("predict"), [runWatchlistJobs]);
+  const updateDataOne = useCallback(
+    (sym: string) => {
+      if (!sym) return;
+      void runWatchlistJobs("data", [sym]);
+    },
+    [runWatchlistJobs],
+  );
+  const predictOne = useCallback(
+    (sym: string) => {
+      if (!sym) return;
+      void runWatchlistJobs("predict", [sym]);
+    },
+    [runWatchlistJobs],
+  );
+
   const cancelPredict = useCallback(async () => {
     setBusy(true);
     setError("");
     setInfo("");
     try {
       await api.watchlistPredictCancel();
-      setInfo("已取消进行中的预测任务");
+      setInfo("已取消进行中的任务");
       await loadBoard();
     } catch (e: any) {
       setError(String(e.message || e));
@@ -386,12 +410,21 @@ export default function SignalsPage() {
               )}
               <button
                 type="button"
+                className="btn"
+                disabled={busy || predicting || items.length === 0}
+                onClick={updateDataAll}
+                title="对关注列表仅下载最新行情（download）"
+              >
+                更新数据
+              </button>
+              <button
+                type="button"
                 className="btn primary"
                 disabled={busy || predicting || items.length === 0}
                 onClick={predictAll}
-                title="对关注列表执行 download→…→predict→signals"
+                title="对关注列表执行 merge→…→predict→signals（不重新下载）"
               >
-                {busy || predicting ? "更新中…" : "更新数据并预测"}
+                预测
               </button>
               {predicting && (
                 <button
@@ -399,18 +432,18 @@ export default function SignalsPage() {
                   className="btn"
                   disabled={busy}
                   onClick={cancelPredict}
-                  title="取消排队中/运行中的预测任务"
+                  title="取消排队中/运行中的任务"
                 >
-                  取消预测
+                  取消
                 </button>
               )}
             </div>
           </div>
           {predicting && (
             <p className="muted" style={{ margin: "0 0 0.65rem" }}>
-              预测批量进行中：运行 {predictStats.running} · 排队 {predictStats.queued}
+              {activeBatchLabel}批量进行中：运行 {predictStats.running} · 排队 {predictStats.queued}
               {predictStats.failed ? ` · 失败 ${predictStats.failed}` : ""}
-              （worker 并发有限，排队属正常；可点「取消预测」）
+              （worker 并发有限，排队属正常；可点「取消」）
             </p>
           )}
           {activePredictJob && <JobProgress job={activePredictJob} />}
@@ -635,10 +668,18 @@ export default function SignalsPage() {
             <button
               className="btn"
               disabled={busy || predicting}
-              onClick={() => predictOne(selected.symbol)}
-              title="仅更新并预测当前股票"
+              onClick={() => updateDataOne(selected.symbol)}
+              title="仅下载当前股票最新行情"
             >
-              更新并预测
+              更新数据
+            </button>
+            <button
+              className="btn primary"
+              disabled={busy || predicting}
+              onClick={() => predictOne(selected.symbol)}
+              title="对当前股票执行预测（不重新下载）"
+            >
+              预测
             </button>
             <button className="btn" onClick={() => loadHistory()}>
               刷新

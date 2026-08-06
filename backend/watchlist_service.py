@@ -13,6 +13,8 @@ from sqlalchemy import select
 
 from shared import (
     DAILY_PREDICT_STEPS,
+    DATA_UPDATE_STEPS,
+    INFER_STEPS,
     PACKAGE_ROOT,
     TRAIN_UPDATE_STEPS,
     get_config_path,
@@ -57,6 +59,23 @@ def build_overrides(symbol: str, *, train: bool) -> dict[str, Any]:
     overrides = symbol_config_overrides(symbol)
     overrides.update(_data_folder_override())
     overrides["train"] = train
+    return overrides
+
+
+def build_batch_overrides(symbols: list[str], *, batch_mode: str) -> dict[str, Any]:
+    """Overrides for a multi-symbol watchlist job (symbol=_watchlist concurrency key)."""
+    codes = [str(s).zfill(6) for s in symbols if str(s).strip()]
+    overrides: dict[str, Any] = {
+        "symbol": "_watchlist",
+        "description": f"Watchlist batch {batch_mode} ({len(codes)} symbols)",
+        "data_sources": [{"folder": c, "file": "klines", "column_prefix": ""} for c in codes],
+        "mlflow_registry_prefix": "itb_watchlist_",
+        "mlflow_experiment_name": "itb_watchlist",
+        "train": False,
+        "batch_mode": batch_mode,
+        "batch_symbols": codes,
+    }
+    overrides.update(_data_folder_override())
     return overrides
 
 
@@ -417,15 +436,27 @@ async def cancel_open_train_batch() -> dict[str, Any] | None:
         return _batch_progress(session, batch_id)
 
 
+_PREDICT_BATCH_KINDS = ("predict", "download")
+
+
 def find_open_predict_batch_id() -> int | None:
     SessionLocal = get_session_factory()
     with SessionLocal() as session:
         batch = session.scalars(
             select(BatchRun)
-            .where(BatchRun.kind == "predict", BatchRun.status.in_(("queued", "running")))
+            .where(
+                BatchRun.kind.in_(_PREDICT_BATCH_KINDS),
+                BatchRun.status.in_(("queued", "running")),
+            )
             .order_by(BatchRun.id.desc())
         ).first()
         return batch.id if batch else None
+
+
+def _steps_for_batch_kind(kind: str) -> list[str]:
+    if kind == "download":
+        return list(DATA_UPDATE_STEPS)
+    return list(DAILY_PREDICT_STEPS)
 
 
 def active_predict_batch() -> dict[str, Any] | None:
@@ -435,7 +466,8 @@ def active_predict_batch() -> dict[str, Any] | None:
     SessionLocal = get_session_factory()
     with SessionLocal() as session:
         progress = _batch_progress(session, batch_id)
-        progress["steps"] = list(DAILY_PREDICT_STEPS)
+        batch = session.get(BatchRun, batch_id)
+        progress["steps"] = _steps_for_batch_kind(batch.kind if batch else "predict")
         return progress
 
 
@@ -492,7 +524,8 @@ async def cancel_open_predict_batch() -> dict[str, Any] | None:
         session.commit()
         if batch_id is not None:
             progress = _batch_progress(session, batch_id)
-            progress["steps"] = list(DAILY_PREDICT_STEPS)
+            batch = session.get(BatchRun, batch_id)
+            progress["steps"] = _steps_for_batch_kind(batch.kind if batch else "predict")
             return progress
         return {
             "batch_id": None,
@@ -796,12 +829,57 @@ def _is_trained(item: WatchlistItem) -> bool:
     return frame_exists(item.symbol, "signals")
 
 
+def _predict_mode_plan(mode: str | None) -> tuple[str, list[str], bool]:
+    """Return (batch_kind, steps, require_trained) for a predict API mode."""
+    m = (mode or "full").strip().lower()
+    if m == "data":
+        return "download", list(DATA_UPDATE_STEPS), False
+    if m == "predict":
+        return "predict", list(INFER_STEPS), True
+    return "predict", list(DAILY_PREDICT_STEPS), True
+
+
+def _attach_job_to_symbols(
+    session,
+    *,
+    batch_id: int,
+    symbols: list[str],
+    job_id: str,
+) -> None:
+    for symbol in symbols:
+        item = session.get(WatchlistItem, symbol)
+        link = session.scalars(
+            select(SymbolRunLink).where(
+                SymbolRunLink.batch_id == batch_id,
+                SymbolRunLink.symbol == symbol,
+            )
+        ).first()
+        if item:
+            item.predict_status = "running"
+            item.last_predict_job_id = job_id
+        if link is None:
+            session.add(
+                SymbolRunLink(
+                    batch_id=batch_id,
+                    symbol=symbol,
+                    job_id=job_id,
+                    status="running",
+                )
+            )
+        else:
+            link.job_id = job_id
+            link.status = "running"
+
+
 async def predict_symbols(
     symbols: list[str] | None = None,
     note: str = "manual",
     *,
     team: str | None = None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
+    mode_resolved = (mode or "full").strip().lower()
+    batch_kind, steps, require_trained = _predict_mode_plan(mode_resolved)
     SessionLocal = get_session_factory()
     with SessionLocal() as session:
         if symbols:
@@ -810,14 +888,14 @@ async def predict_symbols(
         else:
             items = list(session.scalars(select(WatchlistItem).order_by(WatchlistItem.created_at.asc())).all())
 
-        batch = BatchRun(kind="predict", status="running", note=note)
+        batch = BatchRun(kind=batch_kind, status="running", note=note)
         session.add(batch)
         session.flush()
 
         planned: list[tuple[str, WatchlistItem]] = []
         skipped: list[dict[str, str]] = []
         for item in items:
-            if not _is_trained(item):
+            if require_trained and not _is_trained(item):
                 skipped.append({"symbol": item.symbol, "reason": "untrained"})
                 item.predict_status = "skipped"
                 item.last_error = "Model not trained; run 更新模型 first"
@@ -838,53 +916,81 @@ async def predict_symbols(
         planned_symbols = [s for s, _ in planned]
 
     jobs: list[dict[str, Any]] = []
-    # Serial enqueue (worker still may run concurrently; UI expects ordered submission)
-    for symbol in planned_symbols:
-        overrides = build_overrides(symbol, train=False)
+    use_batch = len(planned_symbols) > 1
+
+    if use_batch:
+        # One Prefect job for the whole watchlist slice.
+        batch_mode = mode_resolved if mode_resolved in ("data", "predict", "full") else "full"
+        if batch_mode == "data":
+            steps = list(DATA_UPDATE_STEPS)
+        elif batch_mode == "predict":
+            steps = list(INFER_STEPS)
+        else:
+            steps = list(DAILY_PREDICT_STEPS)
+        overrides = build_batch_overrides(planned_symbols, batch_mode=batch_mode)
         try:
-            job = await _enqueue_job(list(DAILY_PREDICT_STEPS), overrides, team=team)
+            job = await _enqueue_job(list(steps), overrides, team=team)
             job_id = job.get("job_id", "")
             with SessionLocal() as session:
-                item = session.get(WatchlistItem, symbol)
-                link = session.scalars(
-                    select(SymbolRunLink).where(
-                        SymbolRunLink.batch_id == batch_id,
-                        SymbolRunLink.symbol == symbol,
-                    )
-                ).first()
-                if item:
-                    item.predict_status = "running"
-                    item.last_predict_job_id = job_id
-                if link is None:
+                _attach_job_to_symbols(
+                    session, batch_id=batch_id, symbols=planned_symbols, job_id=job_id
+                )
+                session.commit()
+            jobs.append(
+                {
+                    "symbol": "_watchlist",
+                    "job_id": job_id,
+                    "status": "queued",
+                    "batch": True,
+                    "symbols": list(planned_symbols),
+                }
+            )
+        except Exception as e:
+            with SessionLocal() as session:
+                for symbol in planned_symbols:
+                    item = session.get(WatchlistItem, symbol)
+                    if item:
+                        item.predict_status = "failed"
+                        item.last_error = str(e)
                     session.add(
                         SymbolRunLink(
                             batch_id=batch_id,
                             symbol=symbol,
-                            job_id=job_id,
-                            status="running",
+                            status="failed",
+                            error=str(e),
                         )
                     )
-                else:
-                    link.job_id = job_id
-                    link.status = "running"
                 session.commit()
-            jobs.append({"symbol": symbol, "job_id": job_id, "status": "queued"})
-        except Exception as e:
-            with SessionLocal() as session:
-                item = session.get(WatchlistItem, symbol)
-                if item:
-                    item.predict_status = "failed"
-                    item.last_error = str(e)
-                session.add(
-                    SymbolRunLink(
-                        batch_id=batch_id,
-                        symbol=symbol,
-                        status="failed",
-                        error=str(e),
+            skipped.extend({"symbol": s, "reason": str(e)} for s in planned_symbols)
+    else:
+        # Single-symbol path (per-row buttons / tiny watchlist).
+        for symbol in planned_symbols:
+            overrides = build_overrides(symbol, train=False)
+            try:
+                job = await _enqueue_job(list(steps), overrides, team=team)
+                job_id = job.get("job_id", "")
+                with SessionLocal() as session:
+                    _attach_job_to_symbols(
+                        session, batch_id=batch_id, symbols=[symbol], job_id=job_id
                     )
-                )
-                session.commit()
-            skipped.append({"symbol": symbol, "reason": str(e)})
+                    session.commit()
+                jobs.append({"symbol": symbol, "job_id": job_id, "status": "queued"})
+            except Exception as e:
+                with SessionLocal() as session:
+                    item = session.get(WatchlistItem, symbol)
+                    if item:
+                        item.predict_status = "failed"
+                        item.last_error = str(e)
+                    session.add(
+                        SymbolRunLink(
+                            batch_id=batch_id,
+                            symbol=symbol,
+                            status="failed",
+                            error=str(e),
+                        )
+                    )
+                    session.commit()
+                skipped.append({"symbol": symbol, "reason": str(e)})
 
     with SessionLocal() as session:
         batch = session.get(BatchRun, batch_id)
@@ -898,7 +1004,10 @@ async def predict_symbols(
         "batch_id": batch_id,
         "jobs": jobs,
         "skipped": skipped,
-        "steps": list(DAILY_PREDICT_STEPS),
+        "steps": list(steps),
+        "mode": mode_resolved,
+        "kind": batch_kind,
+        "batched": use_batch,
     }
 
 
@@ -1070,14 +1179,15 @@ def sync_job_status(symbol: str, job_id: str, kind: str, status: str, error: str
                 item.train_status = "running"
             elif status == "queued":
                 item.train_status = "queued"
-        elif kind == "predict":
+        elif kind in ("predict", "download"):
             if status == "completed":
-                item.predict_status = "ready"
-                item.last_predicted_at = _utcnow()
+                item.predict_status = "ready" if kind == "predict" else "idle"
+                if kind == "predict":
+                    item.last_predicted_at = _utcnow()
                 item.last_error = ""
             elif status == "failed":
                 item.predict_status = "failed"
-                item.last_error = error or "predict failed"
+                item.last_error = error or ("predict failed" if kind == "predict" else "data update failed")
             elif status == "cancelled":
                 item.predict_status = "idle"
                 item.last_error = error or "cancelled by user"
@@ -1092,8 +1202,14 @@ def sync_job_status(symbol: str, job_id: str, kind: str, status: str, error: str
                 item.last_predict_job_id = job_id
 
         if job_id and status in ("completed", "failed", "cancelled", "running", "queued"):
+            # Scope by symbol so shared batch job_ids do not clobber sibling links.
             links = list(
-                session.scalars(select(SymbolRunLink).where(SymbolRunLink.job_id == job_id)).all()
+                session.scalars(
+                    select(SymbolRunLink).where(
+                        SymbolRunLink.job_id == job_id,
+                        SymbolRunLink.symbol == symbol,
+                    )
+                ).all()
             )
             for link in links:
                 link.status = "skipped" if status == "cancelled" else status
@@ -1140,6 +1256,10 @@ def _parse_job_steps(raw: Any) -> list[str]:
 
 def _job_progress_payload(kind: str, job: dict[str, Any]) -> dict[str, Any]:
     steps = _parse_job_steps(job.get("steps"))
+    # Download-only jobs reuse predict_status / last_predict_job_id; infer kind from steps.
+    resolved_kind = kind
+    if kind != "train" and steps == list(DATA_UPDATE_STEPS):
+        resolved_kind = "download"
     current = str(job.get("current_step") or "").strip()
     try:
         progress = int(float(job.get("progress") or 0))
@@ -1148,7 +1268,7 @@ def _job_progress_payload(kind: str, job: dict[str, Any]) -> dict[str, Any]:
     progress = max(0, min(100, progress))
     step_index = steps.index(current) + 1 if current and current in steps else 0
     return {
-        "kind": kind,
+        "kind": resolved_kind,
         "job_id": job.get("job_id") or "",
         "status": str(job.get("status") or ""),
         "current_step": current,
@@ -1180,7 +1300,11 @@ async def refresh_running_statuses() -> None:
             if not link.job_id:
                 continue
             batch = session.get(BatchRun, link.batch_id)
-            kind = batch.kind if batch and batch.kind in ("train", "predict") else "predict"
+            kind = (
+                batch.kind
+                if batch and batch.kind in ("train", "predict", "download")
+                else "predict"
+            )
             link_snapshot.append((link.symbol, link.job_id, kind))
 
     # Deduplicate by job_id — large watchlists otherwise fan out hundreds of HTTP calls.

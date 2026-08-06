@@ -139,9 +139,9 @@ services:
       - PREFECT_API_URL=http://prefect-server:4200/api
       - PREFECT_UI_URL=http://localhost:4200
       - PIPELINE_URL=http://pipeline:8001
-      - ITB_PREFECT_SERVE_LIMIT=2
+      - ITB_PREFECT_SERVE_LIMIT=10
       - ITB_TRAIN_CONCURRENCY=1
-      - ITB_PREDICT_CONCURRENCY=2
+      - ITB_PREDICT_CONCURRENCY=10
       - ITB_PREDICT_CRON=0 16 * * 1-5
       - ITB_PREDICT_TZ=Asia/Shanghai
       - ITB_PREDICT_ENABLED=true

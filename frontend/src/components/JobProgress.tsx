@@ -33,7 +33,14 @@ export default function JobProgress({ job, compact = false }: Props) {
   const progress = Math.max(0, Math.min(100, Number(job.progress || 0)));
   const idx = job.step_index || (current && steps.includes(current) ? steps.indexOf(current) + 1 : 0);
   const total = job.step_total || steps.length;
-  const kindLabel = job.kind === "predict" ? "预测" : job.kind === "train" ? "训练" : "任务";
+  const kindLabel =
+    job.kind === "predict"
+      ? "预测"
+      : job.kind === "download"
+        ? "数据更新"
+        : job.kind === "train"
+          ? "训练"
+          : "任务";
   const label = activeLabel(job);
 
   if (compact) {
