@@ -378,7 +378,8 @@ def fetch_index_constituents(index: str) -> list[dict]:
     def _call():
         return ak.index_stock_cons_csindex(symbol=index_code)
 
-    raw = _with_retries(f"index_cons:{index_code}", _call)
+    # Upstream (中证) occasionally stalls; bound each attempt so the API can fail fast.
+    raw = _with_retries(f"index_cons:{index_code}", _call, retries=2, timeout_s=25.0)
     if raw is None or raw.empty:
         raise RuntimeError(f"指数 {preset['name']}({index_code}) 成分股为空")
 
@@ -456,11 +457,27 @@ def _normalize_ohlcv(raw: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def _with_retries(label: str, fn, retries: int = 3, delay: float = 1.5):
+def _with_retries(
+    label: str,
+    fn,
+    retries: int = 3,
+    delay: float = 1.5,
+    timeout_s: float | None = None,
+):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
     last_err: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
-            return fn()
+            if timeout_s is None:
+                return fn()
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(fn).result(timeout=timeout_s)
+        except FuturesTimeout:
+            last_err = TimeoutError(f"{label} timed out after {timeout_s:.0f}s")
+            print(f"{label} attempt {attempt}/{retries} failed: {last_err}")
+            if attempt < retries:
+                time.sleep(delay * attempt)
         except Exception as e:
             last_err = e
             print(f"{label} attempt {attempt}/{retries} failed: {e}")

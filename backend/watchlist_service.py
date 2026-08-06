@@ -157,16 +157,23 @@ def import_index(index: str) -> dict[str, Any]:
 
     preset = resolve_index_preset(index)
     constituents = fetch_index_constituents(index)
+    codes = [row["code"] for row in constituents]
 
     added: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
 
     SessionLocal = get_session_factory()
     with SessionLocal() as session:
+        existing_codes = set(
+            session.scalars(
+                select(WatchlistItem.symbol).where(WatchlistItem.symbol.in_(codes))
+            ).all()
+        ) if codes else set()
+
+        new_items: list[WatchlistItem] = []
         for row in constituents:
             code = row["code"]
-            existing = session.get(WatchlistItem, code)
-            if existing:
+            if code in existing_codes:
                 skipped.append({"symbol": code, "reason": "exists"})
                 continue
             item = WatchlistItem(
@@ -176,10 +183,15 @@ def import_index(index: str) -> dict[str, Any]:
                 train_status="untrained",
                 predict_status="idle",
             )
-            session.add(item)
-            session.flush()
-            added.append(_item_dict(item))
-        session.commit()
+            new_items.append(item)
+            existing_codes.add(code)
+
+        if new_items:
+            session.add_all(new_items)
+            session.commit()
+            added = [_item_dict(item) for item in new_items]
+        else:
+            session.rollback()
 
     return {
         "index": preset["code"],

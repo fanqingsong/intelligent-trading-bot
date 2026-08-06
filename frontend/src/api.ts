@@ -94,7 +94,12 @@ export const api = {
       skipped: number;
       items: any[];
       skipped_items: { symbol: string; reason: string }[];
-    }>("/api/watchlist/import", { method: "POST", body: JSON.stringify({ index }) }),
+    }>("/api/watchlist/import", {
+      method: "POST",
+      body: JSON.stringify({ index }),
+      // Index constituent fetch (akshare) can exceed 30s when the upstream is slow.
+      timeoutMs: 120_000,
+    }),
   watchlistDelete: (symbol: string) =>
     request(`/api/watchlist/${encodeURIComponent(symbol)}`, { method: "DELETE" }),
   watchlistTrain: (symbol: string, team?: string) => {
