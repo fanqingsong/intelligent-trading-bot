@@ -1132,8 +1132,8 @@ def _summarize_signal_frames(
         "close": close,
         "fresh": fresh,
         "has_signal": has_signal,
-        # Only actionable signals expose a timestamp; HOLD/stale → UI「无信号」.
-        "timestamp": latest.get("timestamp") if has_signal else None,
+        # Timestamp of the latest prediction row (BUY/SELL/HOLD); empty frames stay null.
+        "timestamp": latest.get("timestamp"),
     })
     return summary
 
@@ -1143,8 +1143,8 @@ def symbol_signals(symbol: str) -> dict[str, Any]:
 
     Board semantics:
     - ``close`` comes from the latest kline when available (else signals).
-    - A trade signal (BUY/SELL) is only reported when signals are aligned with the
-      latest kline day. HOLD or stale predictions → no ``timestamp`` (UI: 无信号).
+    - A trade signal (BUY/SELL) is only ``has_signal`` when predictions align with the
+      latest kline day. Fresh/stale HOLD still returns ``available`` + ``timestamp``.
     """
     df = load_frame_tail(symbol, "signals", n=1)
     klines = load_frame_tail(symbol, "klines", n=1)

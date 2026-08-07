@@ -733,13 +733,48 @@ table.data th {
   background: #121820;
 }
 
-.signal-detail {
-  scroll-margin-top: 1rem;
-}
-
 .signal-detail-bar {
   align-items: flex-start;
   margin-bottom: 0.5rem;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem 1rem;
+  overflow-y: auto;
+  background: rgba(6, 10, 14, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.modal-dialog {
+  width: min(1100px, 100%);
+  margin: auto 0;
+  padding: 1.25rem 1.35rem 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+}
+
+.signal-detail-modal .signal-detail-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-bottom: 0.5rem;
+  background: var(--bg-elevated);
+}
+
+.modal-close {
+  min-width: 2.25rem;
+  padding-left: 0.55rem;
+  padding-right: 0.55rem;
+  font-size: 1.35rem;
+  line-height: 1;
 }
 
 .signal-chart {

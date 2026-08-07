@@ -1,17 +1,15 @@
-import { Navigate, NavLink, Route, Routes } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes, useSearchParams } from "react-router-dom";
 import WatchlistPage from "./pages/Watchlist";
 import Dashboard from "./pages/Dashboard";
 import ConfigPage from "./pages/Config";
 import PipelinePage from "./pages/Pipeline";
 import DataPage from "./pages/Data";
-import ModelsPage from "./pages/Models";
 import BacktestPage from "./pages/Backtest";
 import SignalsPage from "./pages/Signals";
 
 const primaryLinks = [
   ["/", "Signals"],
   ["/watchlist", "Watchlist"],
-  ["/models", "Models"],
 ] as const;
 
 const advancedLinks = [
@@ -21,6 +19,13 @@ const advancedLinks = [
   ["/data", "Data"],
   ["/backtest", "Backtest"],
 ] as const;
+
+function ModelsRedirect() {
+  const [searchParams] = useSearchParams();
+  const symbol = searchParams.get("symbol");
+  const to = symbol ? `/?symbol=${encodeURIComponent(symbol)}` : "/";
+  return <Navigate to={to} replace />;
+}
 
 export default function App() {
   return (
@@ -49,11 +54,11 @@ export default function App() {
           <Route path="/" element={<SignalsPage />} />
           <Route path="/watchlist" element={<WatchlistPage />} />
           <Route path="/signals" element={<Navigate to="/" replace />} />
+          <Route path="/models" element={<ModelsRedirect />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/config" element={<ConfigPage />} />
           <Route path="/pipeline" element={<PipelinePage />} />
           <Route path="/data" element={<DataPage />} />
-          <Route path="/models" element={<ModelsPage />} />
           <Route path="/backtest" element={<BacktestPage />} />
         </Routes>
       </main>

@@ -152,7 +152,7 @@ export default function WatchlistPage() {
   return (
     <div>
       <h1 className="page-title">Watchlist</h1>
-      <p className="page-sub">维护关注股票 · 训练与信号见 Models / Signals</p>
+      <p className="page-sub">维护关注股票 · 训练与预测见 Signals</p>
       {error && <p className="error">{error}</p>}
       {info && <p className="muted">{info}</p>}
 
@@ -244,12 +244,12 @@ export default function WatchlistPage() {
                     )}
                   </td>
                   <td>
-                    <Link to={`/models?symbol=${encodeURIComponent(it.symbol)}`}>
+                    <Link to={`/?symbol=${encodeURIComponent(it.symbol)}`}>
                       <span className={badgeClass(it.train_status)}>{it.train_status}</span>
                     </Link>
                   </td>
                   <td>
-                    <Link to={`/models?symbol=${encodeURIComponent(it.symbol)}`}>
+                    <Link to={`/?symbol=${encodeURIComponent(it.symbol)}`}>
                       <span className={badgeClass(it.predict_status)}>{it.predict_status}</span>
                     </Link>
                   </td>
