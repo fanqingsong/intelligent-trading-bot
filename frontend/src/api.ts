@@ -102,6 +102,11 @@ export const api = {
     }),
   watchlistDelete: (symbol: string) =>
     request(`/api/watchlist/${encodeURIComponent(symbol)}`, { method: "DELETE" }),
+  watchlistStar: (symbol: string, starred: boolean | null = null) =>
+    request<{ starred: boolean }>(`/api/watchlist/${encodeURIComponent(symbol)}/star`, {
+      method: "PATCH",
+      body: JSON.stringify({ starred }),
+    }),
   watchlistTrain: (symbol: string, team?: string) => {
     const q = team ? `?team=${encodeURIComponent(team)}` : "";
     return request<JobRef & { symbol: string; steps: string[] }>(

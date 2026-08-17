@@ -102,6 +102,7 @@ def _item_dict(item: WatchlistItem) -> dict[str, Any]:
         "last_error": item.last_error,
         "last_train_job_id": item.last_train_job_id,
         "last_predict_job_id": item.last_predict_job_id,
+        "starred": item.starred,
     }
 
 
@@ -148,6 +149,26 @@ def delete_item(symbol: str) -> bool:
         session.delete(item)
         session.commit()
         return True
+
+
+def toggle_star(symbol: str, starred: bool | None = None) -> dict[str, Any] | None:
+    """Toggle or set the starred flag for a watchlist item.
+
+    If *starred* is None, flip the current value.  Otherwise set it explicitly.
+    Returns the updated item dict, or None if the symbol is not found.
+    """
+    SessionLocal = get_session_factory()
+    with SessionLocal() as session:
+        item = session.get(WatchlistItem, symbol)
+        if not item:
+            return None
+        if starred is None:
+            item.starred = not item.starred
+        else:
+            item.starred = starred
+        session.commit()
+        session.refresh(item)
+        return _item_dict(item)
 
 
 def import_index(index: str) -> dict[str, Any]:

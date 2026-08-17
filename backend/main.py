@@ -187,6 +187,10 @@ class WatchlistImportRequest(BaseModel):
     index: str  # sse50 | csi300 | 000016 | 000300
 
 
+class StarRequest(BaseModel):
+    starred: bool | None = None  # None = toggle
+
+
 class PredictRequest(BaseModel):
     symbols: list[str] | None = None
     team: str | None = None
@@ -291,6 +295,16 @@ def watchlist_delete(symbol: str):
     if not delete_item(symbol):
         raise HTTPException(404, "Symbol not in watchlist")
     return {"ok": True, "symbol": symbol}
+
+
+@app.patch("/api/watchlist/{symbol}/star")
+def watchlist_star(symbol: str, req: StarRequest):
+    from backend.watchlist_service import toggle_star
+
+    result = toggle_star(symbol, starred=req.starred)
+    if not result:
+        raise HTTPException(404, "Symbol not in watchlist")
+    return result
 
 
 @app.post("/api/watchlist/predict")

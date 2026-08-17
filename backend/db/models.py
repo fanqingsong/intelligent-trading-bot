@@ -28,6 +28,7 @@ class WatchlistItem(Base):
     last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
     last_train_job_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     last_predict_job_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    starred: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class ScheduleSettings(Base):

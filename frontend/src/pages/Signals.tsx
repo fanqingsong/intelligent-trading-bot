@@ -31,6 +31,7 @@ type WatchItem = {
   signal_timestamp?: string | null;
   signal_available?: boolean;
   has_signal?: boolean;
+  starred?: boolean;
   train_status?: string;
   predict_status?: string;
   last_error?: string;
@@ -97,6 +98,19 @@ const VOTE_OPTIONS: { value: VoteFilter; label: string }[] = [
   { value: "SELL", label: "SELL" },
   { value: "HOLD", label: "HOLD" },
 ];
+
+type SortKey =
+  | "score"
+  | "symbol"
+  | "name"
+  | "starred"
+  | "last_trained_at"
+  | "last_data_downloaded_at"
+  | "last_predicted_at"
+  | "vote";
+type SortDir = "asc" | "desc";
+
+const PAGE_SIZE = 20;
 
 const METRIC_KEYS = ["auc", "ap", "f1", "precision", "recall", "accuracy", "mae", "mape", "r2"];
 
@@ -219,6 +233,10 @@ export default function SignalsPage() {
   const [showAssets, setShowAssets] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [filters, setFilters] = useState<TableFilters>(EMPTY_FILTERS);
+  const [starFilter, setStarFilter] = useState<"" | "starred" | "unstarred">("");
+  const [sortKey, setSortKey] = useState<SortKey>("score");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [page, setPage] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [prefectUrl, setPrefectUrl] = useState<string | null>(null);
   const [schedule, setSchedule] = useState<any>(null);
@@ -232,14 +250,70 @@ export default function SignalsPage() {
     [items, symbol, detailOpen],
   );
 
+  const toggleSort = useCallback(
+    (key: SortKey) => {
+      if (sortKey === key) {
+        setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+      } else {
+        setSortKey(key);
+        setSortDir(key === "score" || key === "last_trained_at" || key === "last_predicted_at" || key === "last_data_downloaded_at" ? "desc" : "asc");
+      }
+    },
+    [sortKey],
+  );
+
   const sortedItems = useMemo(() => {
     return [...items].sort((a, b) => {
-      const sa = avgScore(a.algorithms) ?? voteFallbackScore(a.vote);
-      const sb = avgScore(b.algorithms) ?? voteFallbackScore(b.vote);
-      if (sb !== sa) return sb - sa;
+      // Starred items always float to the top within same score group
+      const aStar = a.starred ? 1 : 0;
+      const bStar = b.starred ? 1 : 0;
+      if (aStar !== bStar) return bStar - aStar;
+
+      const dir = sortDir === "asc" ? 1 : -1;
+      const dirRev = sortDir === "asc" ? -1 : 1;
+
+      switch (sortKey) {
+        case "score": {
+          const sa = avgScore(a.algorithms) ?? voteFallbackScore(a.vote);
+          const sb = avgScore(b.algorithms) ?? voteFallbackScore(b.vote);
+          if (sb !== sa) return dirRev * (sa - sb);
+          break;
+        }
+        case "symbol":
+          return dir * a.symbol.localeCompare(b.symbol);
+        case "name":
+          return dir * (a.name || "").localeCompare(b.name || "");
+        case "starred":
+          return dirRev * (Number(a.starred) - Number(b.starred));
+        case "vote": {
+          const order: Record<string, number> = { BUY: 3, SELL: 2, HOLD: 1 };
+          const oa = order[voteLabel(a) || "HOLD"] ?? 0;
+          const ob = order[voteLabel(b) || "HOLD"] ?? 0;
+          if (ob !== oa) return dirRev * (oa - ob);
+          break;
+        }
+        case "last_trained_at": {
+          const ta = a.last_trained_at || "";
+          const tb = b.last_trained_at || "";
+          if (tb !== ta) return dirRev * ta.localeCompare(tb);
+          break;
+        }
+        case "last_data_downloaded_at": {
+          const ta = a.last_data_downloaded_at || "";
+          const tb = b.last_data_downloaded_at || "";
+          if (tb !== ta) return dirRev * ta.localeCompare(tb);
+          break;
+        }
+        case "last_predicted_at": {
+          const ta = a.last_predicted_at || "";
+          const tb = b.last_predicted_at || "";
+          if (tb !== ta) return dirRev * ta.localeCompare(tb);
+          break;
+        }
+      }
       return a.symbol.localeCompare(b.symbol);
     });
-  }, [items]);
+  }, [items, sortKey, sortDir]);
 
   const filteredItems = useMemo(() => {
     return sortedItems.filter((it) => {
@@ -265,9 +339,24 @@ export default function SignalsPage() {
 
       if (filters.train && (it.train_status || "") !== filters.train) return false;
 
+      if (starFilter === "starred" && !it.starred) return false;
+      if (starFilter === "unstarred" && it.starred) return false;
+
       return true;
     });
-  }, [sortedItems, filters]);
+  }, [sortedItems, filters, starFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const paginatedItems = useMemo(
+    () => filteredItems.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE),
+    [filteredItems, safePage],
+  );
+
+  // Reset page when filters change
+  useEffect(() => {
+    setPage(0);
+  }, [filters, starFilter]);
 
   const predicting = useMemo(
     () =>
@@ -718,7 +807,30 @@ export default function SignalsPage() {
     setFilters((prev) => ({ ...prev, algos: { ...prev.algos, [algo]: value } }));
   };
 
-  const active = filtersActive(filters);
+  const toggleStar = useCallback(async (sym: string, e?: MouseEvent) => {
+    if (e) e.stopPropagation();
+    const it = items.find((i) => i.symbol === sym);
+    if (!it) return;
+    const next = !it.starred;
+    // Optimistic update
+    setItems((prev) => prev.map((i) => (i.symbol === sym ? { ...i, starred: next } : i)));
+    try {
+      await api.watchlistStar(sym, next);
+    } catch {
+      // Revert on failure
+      setItems((prev) => prev.map((i) => (i.symbol === sym ? { ...i, starred: !next } : i)));
+    }
+  }, [items]);
+
+  const sortArrow = useCallback(
+    (key: SortKey) => {
+      if (sortKey !== key) return "";
+      return sortDir === "asc" ? " ▲" : " ▼";
+    },
+    [sortKey, sortDir],
+  );
+
+  const active = filtersActive(filters) || !!starFilter;
   const anyBusy = !!busy;
 
   return (
@@ -836,12 +948,34 @@ export default function SignalsPage() {
       ) : (
         <div className="panel">
           <div className="signals-table-toolbar">
-            <span className="muted">
-              显示 {filteredItems.length} / {items.length} · 点击行查看信号与模型详情
-            </span>
-            <div className="btn-row" style={{ margin: 0 }}>
+            <div className="signals-toolbar-left">
+              <span className="muted">
+                显示 {filteredItems.length} / {items.length}
+                {totalPages > 1 && (
+                  <span> · 第 {safePage + 1}/{totalPages} 页</span>
+                )}
+                {" · "}点击行查看信号与模型详情
+              </span>
+            </div>
+            <div className="btn-row" style={{ margin: 0, gap: "0.4rem" }}>
+              <select
+                className="input signals-star-filter"
+                value={starFilter}
+                onChange={(e) => setStarFilter(e.target.value as typeof starFilter)}
+              >
+                <option value="">⭐ 全部</option>
+                <option value="starred">⭐ 仅星标</option>
+                <option value="unstarred">☆ 未标</option>
+              </select>
               {active && (
-                <button type="button" className="btn" onClick={() => setFilters(EMPTY_FILTERS)}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    setFilters(EMPTY_FILTERS);
+                    setStarFilter("");
+                  }}
+                >
                   清除过滤
                 </button>
               )}
@@ -851,14 +985,32 @@ export default function SignalsPage() {
             <table className="data signals-table">
               <thead>
                 <tr>
-                  <th>代码</th>
-                  <th>名称</th>
-                  <th>最近训练</th>
-                  <th>最近数据</th>
-                  <th>最近预测</th>
+                  <th className="th-star">⭐</th>
+                  <th className="sortable" onClick={() => toggleSort("symbol")}>
+                    代码{sortArrow("symbol")}
+                  </th>
+                  <th className="sortable" onClick={() => toggleSort("name")}>
+                    名称{sortArrow("name")}
+                  </th>
+                  <th className="sortable" onClick={() => toggleSort("vote")}>
+                    信号{sortArrow("vote")}
+                  </th>
+                  <th className="sortable" onClick={() => toggleSort("score")}>
+                    均分{sortArrow("score")}
+                  </th>
+                  <th className="sortable" onClick={() => toggleSort("last_trained_at")}>
+                    最近训练{sortArrow("last_trained_at")}
+                  </th>
+                  <th className="sortable" onClick={() => toggleSort("last_data_downloaded_at")}>
+                    最近数据{sortArrow("last_data_downloaded_at")}
+                  </th>
+                  <th className="sortable" onClick={() => toggleSort("last_predicted_at")}>
+                    最近预测{sortArrow("last_predicted_at")}
+                  </th>
                   <th>操作</th>
                 </tr>
                 <tr className="signals-filter-row">
+                  <th />
                   <th>
                     <input
                       className="input signals-filter-input"
@@ -881,27 +1033,51 @@ export default function SignalsPage() {
                   <th />
                   <th />
                   <th />
+                  <th />
+                  <th />
                 </tr>
               </thead>
               <tbody>
-                {filteredItems.length === 0 ? (
+                {paginatedItems.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="muted signals-empty-filter">
+                    <td colSpan={9} className="muted signals-empty-filter">
                       无匹配行，请调整过滤条件
                     </td>
                   </tr>
                 ) : (
-                  filteredItems.map((it) => {
+                  paginatedItems.map((it) => {
                     const isActive = detailOpen && symbol === it.symbol;
+                    const vl = voteLabel(it);
+                    const score = avgScore(it.algorithms);
                     return (
                       <tr
                         key={it.symbol}
                         className={`signals-row${isActive ? " active" : ""}`}
                       >
+                        <td onClick={stopRowClick}>
+                          <button
+                            type="button"
+                            className={`star-btn${it.starred ? " active" : ""}`}
+                            onClick={(e) => toggleStar(it.symbol, e)}
+                            title={it.starred ? "取消星标" : "添加星标"}
+                          >
+                            {it.starred ? "★" : "☆"}
+                          </button>
+                        </td>
                         <td>
                           <strong className="gauge-card-symbol">{it.symbol}</strong>
                         </td>
                         <td className="muted">{it.name || it.exchange || "—"}</td>
+                        <td>
+                          {vl ? (
+                            <span className={`rec ${recClass(vl)}`}>{vl}</span>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
+                        <td className="signals-score">
+                          {formatScore(score)}
+                        </td>
                         <td className="muted" style={{ whiteSpace: "nowrap" }}>
                           {formatTime(it.last_trained_at)}
                         </td>
@@ -939,6 +1115,29 @@ export default function SignalsPage() {
               </tbody>
             </table>
           </div>
+          {totalPages > 1 && (
+            <div className="signals-pagination">
+              <button
+                type="button"
+                className="btn"
+                disabled={safePage === 0}
+                onClick={() => setPage((p) => p - 1)}
+              >
+                ← 上一页
+              </button>
+              <span className="muted">
+                {safePage * PAGE_SIZE + 1}–{Math.min((safePage + 1) * PAGE_SIZE, filteredItems.length)} / {filteredItems.length}
+              </span>
+              <button
+                type="button"
+                className="btn"
+                disabled={safePage >= totalPages - 1}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                下一页 →
+              </button>
+            </div>
+          )}
         </div>
       )}
 
