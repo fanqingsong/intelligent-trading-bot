@@ -30,6 +30,8 @@ ASHARE_TEMPLATE = PACKAGE_ROOT / "configs" / "config-ashare-1d.jsonc"
 ALGOS = ("svc", "gb", "nn", "lc")
 _TERMINAL_LINK = frozenset({"completed", "failed", "skipped"})
 _TRAIN_BATCH_POLL_S = float(os.environ.get("ITB_TRAIN_BATCH_POLL_S", "5"))
+_PREDICT_PARALLEL = int(os.environ.get("ITB_PREDICT_PARALLEL", "1")) != 0  # default on
+_PREDICT_SUBMIT_CONCURRENCY = int(os.environ.get("ITB_PREDICT_SUBMIT_CONCURRENCY", "10"))
 
 # In-process processors for durable train-all batches (checkpointed in Postgres).
 _train_batch_tasks: dict[int, asyncio.Task] = {}
@@ -684,6 +686,21 @@ async def train_symbols(
     progress["deduped"] = False
     return progress
 
+_PREDICT_WAIT_POLL_S = float(os.environ.get("ITB_PREDICT_WAIT_POLL_S", "5"))
+
+
+async def _wait_job(job_id: str, *, poll_s: float = _PREDICT_WAIT_POLL_S) -> dict[str, Any] | None:
+    """Poll a pipeline job until it reaches a terminal status. Returns final payload."""
+    while True:
+        data = await _fetch_job(job_id)
+        if data is None:
+            await asyncio.sleep(poll_s)
+            continue
+        status = str(data.get("status") or "")
+        if status in ("completed", "failed", "cancelled"):
+            return data
+        await asyncio.sleep(poll_s)
+
 
 async def _fetch_job(
     job_id: str,
@@ -851,6 +868,62 @@ def _predict_mode_plan(mode: str | None) -> tuple[str, list[str], bool]:
     return "predict", list(DAILY_PREDICT_STEPS), True
 
 
+async def _enqueue_predict_jobs_concurrent(
+    symbols: list[str],
+    steps: list[str],
+    batch_id: int,
+    *,
+    team: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Submit one independent job per symbol, with bounded concurrency on submission.
+
+    Each job acquires its own ``itb-symbol:{code}`` + ``itb-predict`` concurrency
+    slot in Prefect, so up to ``ITB_PREDICT_CONCURRENCY`` symbols run in parallel.
+    The semaphore here only limits how fast we POST to the pipeline worker.
+    """
+    SessionLocal = get_session_factory()
+    sem = asyncio.Semaphore(_PREDICT_SUBMIT_CONCURRENCY)
+    jobs: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+
+    async def _submit_one(symbol: str) -> None:
+        overrides = build_overrides(symbol, train=False)
+        try:
+            async with sem:
+                job = await _enqueue_job(list(steps), overrides, team=team)
+            job_id = job.get("job_id", "")
+            with SessionLocal() as session:
+                _attach_job_to_symbols(
+                    session, batch_id=batch_id, symbols=[symbol], job_id=job_id
+                )
+                session.commit()
+            jobs.append({
+                "symbol": symbol,
+                "job_id": job_id,
+                "status": "queued",
+                "prefect_ui_url": job.get("prefect_ui_url"),
+            })
+        except Exception as e:
+            with SessionLocal() as session:
+                item = session.get(WatchlistItem, symbol)
+                if item:
+                    item.predict_status = "failed"
+                    item.last_error = str(e)
+                session.add(
+                    SymbolRunLink(
+                        batch_id=batch_id,
+                        symbol=symbol,
+                        status="failed",
+                        error=str(e),
+                    )
+                )
+                session.commit()
+            errors.append({"symbol": symbol, "reason": str(e)})
+
+    await asyncio.gather(*[_submit_one(s) for s in symbols])
+    return jobs, errors
+
+
 def _attach_job_to_symbols(
     session,
     *,
@@ -928,81 +1001,179 @@ async def predict_symbols(
         planned_symbols = [s for s, _ in planned]
 
     jobs: list[dict[str, Any]] = []
-    use_batch = len(planned_symbols) > 1
+    use_parallel = _PREDICT_PARALLEL and len(planned_symbols) > 1
 
-    if use_batch:
-        # One Prefect job for the whole watchlist slice.
-        batch_mode = mode_resolved if mode_resolved in ("data", "predict", "full") else "full"
-        if batch_mode == "data":
-            steps = list(DATA_UPDATE_STEPS)
-        elif batch_mode == "predict":
-            steps = list(INFER_STEPS)
-        else:
-            steps = list(DAILY_PREDICT_STEPS)
-        overrides = build_batch_overrides(planned_symbols, batch_mode=batch_mode)
-        try:
-            job = await _enqueue_job(list(steps), overrides, team=team)
-            job_id = job.get("job_id", "")
-            with SessionLocal() as session:
-                _attach_job_to_symbols(
-                    session, batch_id=batch_id, symbols=planned_symbols, job_id=job_id
-                )
-                session.commit()
-            jobs.append(
-                {
-                    "symbol": "_watchlist",
-                    "job_id": job_id,
-                    "status": "queued",
-                    "batch": True,
-                    "symbols": list(planned_symbols),
-                }
-            )
-        except Exception as e:
-            with SessionLocal() as session:
-                for symbol in planned_symbols:
-                    item = session.get(WatchlistItem, symbol)
-                    if item:
-                        item.predict_status = "failed"
-                        item.last_error = str(e)
-                    session.add(
-                        SymbolRunLink(
-                            batch_id=batch_id,
-                            symbol=symbol,
-                            status="failed",
-                            error=str(e),
-                        )
+    if use_parallel:
+        # --- Full mode: batch download first, then concurrent per-symbol infer ---
+        if mode_resolved == "full" and planned_symbols:
+            # Submit a single batch download job for all symbols (multi-data_sources,
+            # pure IO — batching is more efficient than per-symbol downloads).
+            dl_overrides = build_batch_overrides(planned_symbols, batch_mode="data")
+            try:
+                dl_job = await _enqueue_job(list(DATA_UPDATE_STEPS), dl_overrides, team=team)
+                dl_job_id = dl_job.get("job_id", "")
+                with SessionLocal() as session:
+                    _attach_job_to_symbols(
+                        session, batch_id=batch_id, symbols=planned_symbols, job_id=dl_job_id
                     )
-                session.commit()
-            skipped.extend({"symbol": s, "reason": str(e)} for s in planned_symbols)
+                    session.commit()
+                jobs.append(
+                    {
+                        "symbol": "_watchlist",
+                        "job_id": dl_job_id,
+                        "status": "queued",
+                        "batch": True,
+                        "symbols": list(planned_symbols),
+                        "phase": "download",
+                    }
+                )
+                # Wait for download to finish before launching infer jobs.
+                dl_result = await _wait_job(dl_job_id)
+                dl_status = str((dl_result or {}).get("status") or "failed")
+                if dl_status == "failed":
+                    err = str((dl_result or {}).get("error") or "batch download failed")
+                    with SessionLocal() as session:
+                        for symbol in planned_symbols:
+                            item = session.get(WatchlistItem, symbol)
+                            if item:
+                                item.predict_status = "failed"
+                                item.last_error = err
+                            session.add(
+                                SymbolRunLink(
+                                    batch_id=batch_id,
+                                    symbol=symbol,
+                                    status="failed",
+                                    error=err,
+                                )
+                            )
+                        _maybe_finish_batch(session, batch_id)
+                        session.commit()
+                    skipped.extend({"symbol": s, "reason": err} for s in planned_symbols)
+                elif dl_status == "cancelled":
+                    with SessionLocal() as session:
+                        for symbol in planned_symbols:
+                            item = session.get(WatchlistItem, symbol)
+                            if item and item.predict_status in ("queued", "running"):
+                                item.predict_status = "idle"
+                                item.last_error = "download cancelled"
+                        _maybe_finish_batch(session, batch_id)
+                        session.commit()
+                    # Download cancelled — skip infer phase entirely.
+                    planned_symbols = []
+                else:
+                    # Download succeeded — mark all symbols completed for download phase,
+                    # then proceed to concurrent infer.
+                    with SessionLocal() as session:
+                        for symbol in planned_symbols:
+                            item = session.get(WatchlistItem, symbol)
+                            if item and item.predict_status in ("running", "queued"):
+                                item.predict_status = "queued"
+                                item.last_error = ""
+                    # Launch concurrent INFER_STEPS per symbol.
+                    if planned_symbols:
+                        infer_jobs, infer_errors = await _enqueue_predict_jobs_concurrent(
+                            planned_symbols, list(INFER_STEPS), batch_id, team=team
+                        )
+                        jobs.extend(infer_jobs)
+                        skipped.extend(infer_errors)
+            except Exception as e:
+                with SessionLocal() as session:
+                    for symbol in planned_symbols:
+                        item = session.get(WatchlistItem, symbol)
+                        if item:
+                            item.predict_status = "failed"
+                            item.last_error = str(e)
+                        session.add(
+                            SymbolRunLink(
+                                batch_id=batch_id,
+                                symbol=symbol,
+                                status="failed",
+                                error=str(e),
+                            )
+                        )
+                    session.commit()
+                skipped.extend({"symbol": s, "reason": str(e)} for s in planned_symbols)
+        else:
+            # --- Data-only or Predict-only: concurrent per-symbol jobs ---
+            infer_jobs, infer_errors = await _enqueue_predict_jobs_concurrent(
+                planned_symbols, list(steps), batch_id, team=team
+            )
+            jobs.extend(infer_jobs)
+            skipped.extend(infer_errors)
     else:
-        # Single-symbol path (per-row buttons / tiny watchlist).
-        for symbol in planned_symbols:
-            overrides = build_overrides(symbol, train=False)
+        # Legacy single-batch path (used when ITB_PREDICT_PARALLEL=0 or single symbol).
+        use_batch = len(planned_symbols) > 1
+        if use_batch:
+            batch_mode = mode_resolved if mode_resolved in ("data", "predict", "full") else "full"
+            if batch_mode == "data":
+                steps = list(DATA_UPDATE_STEPS)
+            elif batch_mode == "predict":
+                steps = list(INFER_STEPS)
+            else:
+                steps = list(DAILY_PREDICT_STEPS)
+            overrides = build_batch_overrides(planned_symbols, batch_mode=batch_mode)
             try:
                 job = await _enqueue_job(list(steps), overrides, team=team)
                 job_id = job.get("job_id", "")
                 with SessionLocal() as session:
                     _attach_job_to_symbols(
-                        session, batch_id=batch_id, symbols=[symbol], job_id=job_id
+                        session, batch_id=batch_id, symbols=planned_symbols, job_id=job_id
                     )
                     session.commit()
-                jobs.append({"symbol": symbol, "job_id": job_id, "status": "queued"})
+                jobs.append(
+                    {
+                        "symbol": "_watchlist",
+                        "job_id": job_id,
+                        "status": "queued",
+                        "batch": True,
+                        "symbols": list(planned_symbols),
+                    }
+                )
             except Exception as e:
                 with SessionLocal() as session:
-                    item = session.get(WatchlistItem, symbol)
-                    if item:
-                        item.predict_status = "failed"
-                        item.last_error = str(e)
-                    session.add(
-                        SymbolRunLink(
-                            batch_id=batch_id,
-                            symbol=symbol,
-                            status="failed",
-                            error=str(e),
+                    for symbol in planned_symbols:
+                        item = session.get(WatchlistItem, symbol)
+                        if item:
+                            item.predict_status = "failed"
+                            item.last_error = str(e)
+                        session.add(
+                            SymbolRunLink(
+                                batch_id=batch_id,
+                                symbol=symbol,
+                                status="failed",
+                                error=str(e),
+                            )
                         )
-                    )
                     session.commit()
-                skipped.append({"symbol": symbol, "reason": str(e)})
+                skipped.extend({"symbol": s, "reason": str(e)} for s in planned_symbols)
+        else:
+            for symbol in planned_symbols:
+                overrides = build_overrides(symbol, train=False)
+                try:
+                    job = await _enqueue_job(list(steps), overrides, team=team)
+                    job_id = job.get("job_id", "")
+                    with SessionLocal() as session:
+                        _attach_job_to_symbols(
+                            session, batch_id=batch_id, symbols=[symbol], job_id=job_id
+                        )
+                        session.commit()
+                    jobs.append({"symbol": symbol, "job_id": job_id, "status": "queued"})
+                except Exception as e:
+                    with SessionLocal() as session:
+                        item = session.get(WatchlistItem, symbol)
+                        if item:
+                            item.predict_status = "failed"
+                            item.last_error = str(e)
+                        session.add(
+                            SymbolRunLink(
+                                batch_id=batch_id,
+                                symbol=symbol,
+                                status="failed",
+                                error=str(e),
+                            )
+                        )
+                        session.commit()
+                    skipped.append({"symbol": symbol, "reason": str(e)})
 
     with SessionLocal() as session:
         batch = session.get(BatchRun, batch_id)
@@ -1019,8 +1190,9 @@ async def predict_symbols(
         "steps": list(steps),
         "mode": mode_resolved,
         "kind": batch_kind,
-        "batched": use_batch,
+        "batched": not use_parallel and len(planned_symbols) > 1,
     }
+
 
 
 def _algo_recommendation(row: pd.Series, algo: str) -> str:

@@ -53,3 +53,31 @@ def test_daily_predict_nodes_include_predict_without_train():
     assert "train" not in names
     predict_node = next(n for n in pipe.nodes if n.name == "predict")
     assert "trained_models" in predict_node.inputs
+
+
+def test_infer_steps_merge_works_without_download():
+    """INFER_STEPS skips download; merge must still be runnable via catalog.
+
+    raw_sources is a plain MemoryDataset sentinel from download→merge ordering.
+    When download is skipped (INFER_STEPS), raw_sources must be OptionalMemoryDataset
+    so merge can load a default instead of raising 'Data has not been saved yet'.
+    """
+    from shared import INFER_STEPS
+    from kedro_pipeline.pipeline_registry import register_pipelines
+
+    assert "download" not in INFER_STEPS
+    assert "merge" in INFER_STEPS
+    pipe = register_pipelines()["inference"].only_nodes(*INFER_STEPS)
+    merge_node = next(n for n in pipe.nodes if n.name == "merge")
+    assert "raw_sources" in merge_node.inputs
+
+
+def test_optional_memory_dataset_with_bool_default():
+    """OptionalMemoryDataset works with non-dict defaults (e.g. raw_sources=true)."""
+    from kedro_pipeline.catalog.datasets import OptionalMemoryDataset
+
+    ds = OptionalMemoryDataset(default=True)
+    assert ds.exists()
+    assert ds.load() is True
+    ds.save(False)
+    assert ds.load() is False

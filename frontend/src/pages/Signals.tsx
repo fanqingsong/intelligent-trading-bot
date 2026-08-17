@@ -415,7 +415,7 @@ export default function SignalsPage() {
                 : `已提交批量${label}（1 个任务）`,
             );
           } else {
-            setInfo(`已提交 ${nJobs} 只股票的${label}`);
+            setInfo(`已提交 ${nJobs} 只股票的${label}（并行执行）`);
           }
         }
         if (skipped.length) {
@@ -754,7 +754,7 @@ export default function SignalsPage() {
             className="btn"
             disabled={anyBusy || predicting || items.length === 0}
             onClick={updateDataAll}
-            title="对关注列表仅下载最新行情（download）"
+            title="对关注列表并行下载最新行情（download）"
           >
             更新数据
           </button>
@@ -763,7 +763,7 @@ export default function SignalsPage() {
             className="btn primary"
             disabled={anyBusy || predicting || items.length === 0}
             onClick={predictAll}
-            title="对关注列表执行 merge→…→predict→signals（不重新下载）"
+            title="对关注列表并行执行 merge→…→predict→signals（不重新下载）"
           >
             预测
           </button>
@@ -799,9 +799,9 @@ export default function SignalsPage() {
         )}
         {predicting && (
           <p className="muted" style={{ margin: "0 0 0.65rem" }}>
-            {activeBatchLabel}批量进行中：运行 {predictStats.running} · 排队 {predictStats.queued}
+            {activeBatchLabel}进行中：运行 {predictStats.running} · 排队 {predictStats.queued}
             {predictStats.failed ? ` · 失败 ${predictStats.failed}` : ""}
-            （worker 并发有限，排队属正常；可点「取消预测」）
+            （并发执行中，超出槽位的标的自动排队；可点「取消预测」）
           </p>
         )}
         {activePredictJob && <JobProgress job={activePredictJob} />}
