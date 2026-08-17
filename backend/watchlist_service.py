@@ -96,6 +96,7 @@ def _item_dict(item: WatchlistItem) -> dict[str, Any]:
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "last_trained_at": item.last_trained_at.isoformat() if item.last_trained_at else None,
         "last_predicted_at": item.last_predicted_at.isoformat() if item.last_predicted_at else None,
+        "last_data_downloaded_at": item.last_data_downloaded_at.isoformat() if item.last_data_downloaded_at else None,
         "train_status": item.train_status,
         "predict_status": item.predict_status,
         "last_error": item.last_error,
@@ -1368,6 +1369,8 @@ def sync_job_status(symbol: str, job_id: str, kind: str, status: str, error: str
                 item.predict_status = "ready" if kind == "predict" else "idle"
                 if kind == "predict":
                     item.last_predicted_at = _utcnow()
+                if kind == "download":
+                    item.last_data_downloaded_at = _utcnow()
                 item.last_error = ""
             elif status == "failed":
                 item.predict_status = "failed"
@@ -1499,7 +1502,7 @@ async def refresh_running_statuses() -> None:
         if predict_status in ("running", "queued") and predict_job:
             by_job[predict_job] = (symbol, predict_job, "predict")
     for symbol, job_id, kind in link_snapshot:
-        by_job.setdefault(job_id, (symbol, job_id, kind))
+        by_job[job_id] = (symbol, job_id, kind)
     pending = list(by_job.values())
 
     if pending:

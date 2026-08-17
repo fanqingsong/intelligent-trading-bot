@@ -35,9 +35,19 @@ type WatchItem = {
   predict_status?: string;
   last_error?: string;
   last_train_job_id?: string;
+  last_trained_at?: string | null;
+  last_predicted_at?: string | null;
+  last_data_downloaded_at?: string | null;
   predict_job?: JobProgressInfo | null;
   train_job?: JobProgressInfo | null;
   job_progress?: JobProgressInfo | null;
+};
+
+type SuggestItem = {
+  code: string;
+  name: string;
+  exchange: string;
+  label: string;
 };
 
 type VoteFilter = "" | "BUY" | "SELL" | "HOLD";
@@ -107,6 +117,15 @@ function metricChips(metrics: Record<string, number>) {
 function normalizeVote(vote?: string): "BUY" | "SELL" | "HOLD" {
   if (vote === "BUY" || vote === "SELL") return vote;
   return "HOLD";
+}
+
+function formatTime(iso?: string | null): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return "—";
+  }
 }
 
 function hasTradeSignal(it: WatchItem): boolean {
@@ -187,6 +206,15 @@ export default function SignalsPage() {
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState("");
+  // Watchlist management state
+  const [query, setQuery] = useState("");
+  const [suggestSelected, setSuggestSelected] = useState<SuggestItem | null>(null);
+  const [suggestions, setSuggestions] = useState<SuggestItem[]>([]);
+  const [openSuggest, setOpenSuggest] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  const blurTimer = useRef<number | null>(null);
+  const suggestSeq = useRef(0);
   const [showTable, setShowTable] = useState(false);
   const [showAssets, setShowAssets] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -256,41 +284,6 @@ export default function SignalsPage() {
     [items, trainBatch],
   );
 
-  const predictStats = useMemo(() => {
-    let queued = 0;
-    let running = 0;
-    let failed = 0;
-    for (const it of items) {
-      if (it.predict_status === "queued") queued += 1;
-      else if (it.predict_status === "running") running += 1;
-      else if (it.predict_status === "failed") failed += 1;
-    }
-    return { queued, running, failed, active: queued + running };
-  }, [items]);
-
-  const activePredictJob = useMemo(() => {
-    const jobOf = (it: WatchItem) => it.job_progress || it.predict_job || null;
-    const running = items.find((it) => it.predict_status === "running" && jobOf(it));
-    if (running) return jobOf(running);
-    let best: JobProgressInfo | null = null;
-    let bestProgress = -1;
-    for (const it of items) {
-      if (it.predict_status !== "queued") continue;
-      const job = jobOf(it);
-      if (!job) continue;
-      const p = Number(job.progress || 0);
-      if (p > bestProgress || (p === bestProgress && job.current_step)) {
-        best = job;
-        bestProgress = p;
-      }
-    }
-    return best;
-  }, [items]);
-
-  const activeBatchLabel = useMemo(() => {
-    if (activePredictJob?.kind === "download") return "数据更新";
-    return "预测";
-  }, [activePredictJob]);
 
   const loadBoard = useCallback(async () => {
     try {
@@ -402,34 +395,15 @@ export default function SignalsPage() {
         const nJobs = (res.jobs || []).length;
         const skipped = res.skipped || [];
         const label = mode === "data" ? "数据更新" : "预测";
-        const scope = symbols?.length === 1 ? `${symbols[0]}：` : "";
-        const batched = Boolean(res.batched) || (res.jobs || []).some((j: any) => j.batch);
         if (nJobs) {
-          if (symbols?.length === 1) {
-            setInfo(`${scope}已提交${label}`);
-          } else if (batched) {
-            const nSyms = (res.jobs || []).find((j: any) => j.batch)?.symbols?.length;
-            setInfo(
-              nSyms
-                ? `已提交批量${label}（1 个任务 · ${nSyms} 只股票）`
-                : `已提交批量${label}（1 个任务）`,
-            );
-          } else {
-            setInfo(`已提交 ${nJobs} 只股票的${label}（并行执行）`);
-          }
+          setInfo(`${symbols![0]}：已提交${label}`);
         }
         if (skipped.length) {
-          const syms = skipped.map((s: any) => s.symbol).join(", ");
+          const sym = symbols![0];
           if (mode === "data") {
-            setError(nJobs ? `部分失败：${syms}` : `全部失败：${syms}`);
+            setError(`全部失败：${skipped.map((s: any) => s.symbol).join(", ")}`);
           } else {
-            setError(
-              nJobs
-                ? `部分跳过（需先训练）：${syms}`
-                : symbols?.length === 1
-                  ? `${symbols[0]}：未训练，请先更新模型`
-                  : `全部跳过（需先更新模型）：${syms}`,
-            );
+            setError(`${sym}：未训练，请先更新模型`);
           }
         }
       } catch (e: any) {
@@ -441,8 +415,6 @@ export default function SignalsPage() {
     [loadBoard, loadHistory],
   );
 
-  const updateDataAll = useCallback(() => runWatchlistJobs("data"), [runWatchlistJobs]);
-  const predictAll = useCallback(() => runWatchlistJobs("predict"), [runWatchlistJobs]);
   const updateDataOne = useCallback(
     (sym: string) => {
       if (!sym) return;
@@ -457,21 +429,6 @@ export default function SignalsPage() {
     },
     [runWatchlistJobs],
   );
-
-  const cancelPredict = useCallback(async () => {
-    setBusy("predict-cancel");
-    setError("");
-    setInfo("");
-    try {
-      await api.watchlistPredictCancel();
-      setInfo("已取消进行中的预测任务");
-      await loadBoard();
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setBusy("");
-    }
-  }, [loadBoard]);
 
   const trainOne = async (sym: string) => {
     setBusy(`train-${sym}`);
@@ -489,55 +446,6 @@ export default function SignalsPage() {
     }
   };
 
-  const trainAll = async () => {
-    setBusy("train-all");
-    setError("");
-    setInfo("");
-    try {
-      const res = await api.watchlistTrainAll();
-      if (res.batch_id != null) {
-        setTrainBatch({
-          batch_id: res.batch_id,
-          status: res.status,
-          total: res.total,
-          queued: res.queued,
-          running: res.running,
-          completed: res.completed,
-          failed: res.failed,
-          skipped: res.skipped,
-          current_symbol: res.current_symbol,
-          last_error: res.last_error,
-        });
-      }
-      if (res.total === 0) {
-        setError("关注列表为空，无法批量更新模型");
-      } else {
-        setInfo(`已提交批量更新模型（${res.total} 只）`);
-      }
-      await loadBoard();
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const cancelTrainAll = async () => {
-    setBusy("train-cancel");
-    setError("");
-    setInfo("");
-    try {
-      await api.watchlistTrainCancel();
-      setTrainBatch(null);
-      setInfo("已停止批量更新模型");
-      await loadBoard();
-    } catch (e: any) {
-      setError(String(e.message || e));
-    } finally {
-      setBusy("");
-    }
-  };
-
   const cancelTrainOne = async (sym: string) => {
     setBusy(`cancel-${sym}`);
     setError("");
@@ -545,6 +453,83 @@ export default function SignalsPage() {
     try {
       await api.watchlistTrainSymbolCancel(sym);
       setInfo(`${sym}：已停止模型更新`);
+      await loadBoard();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  // --- Watchlist management ---
+
+  const pickSuggest = (item: SuggestItem) => {
+    setSuggestSelected(item);
+    setQuery(item.label);
+    setOpenSuggest(false);
+  };
+
+  const onSuggestKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!openSuggest || suggestions.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlight((h) => (h + 1) % suggestions.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlight((h) => (h - 1 + suggestions.length) % suggestions.length);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      pickSuggest(suggestions[highlight]);
+    } else if (e.key === "Escape") {
+      setOpenSuggest(false);
+    }
+  };
+
+  const addSymbol = async () => {
+    const q = (suggestSelected?.code || query).trim();
+    if (!q) return;
+    setBusy("add");
+    setError("");
+    setInfo("");
+    try {
+      await api.watchlistAdd(q);
+      setQuery("");
+      setSuggestSelected(null);
+      await loadBoard();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const removeSymbol = async (sym: string) => {
+    setBusy(`del-${sym}`);
+    setError("");
+    setInfo("");
+    try {
+      await api.watchlistDelete(sym);
+      if (detailOpen && symbol === sym) closeDetail();
+      await loadBoard();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const importIndex = async (index: "sse50" | "csi300", label: string) => {
+    if (!window.confirm(`将导入${label}全部成分股到关注列表（已存在的会跳过），是否继续？`)) {
+      return;
+    }
+    setBusy(`import-${index}`);
+    setError("");
+    setInfo("");
+    try {
+      const res = await api.watchlistImport(index);
+      setInfo(
+        `已导入${res.index_name}：新增 ${res.added} 只，跳过 ${res.skipped} 只（共 ${res.total} 只成分股）`,
+      );
       await loadBoard();
     } catch (e: any) {
       setError(String(e.message || e));
@@ -601,6 +586,33 @@ export default function SignalsPage() {
       setError(String(e.message || e));
     }
   }
+
+  // Debounced suggestion search
+  useEffect(() => {
+    const q = query.trim();
+    if (!q || (suggestSelected && suggestSelected.label === query)) {
+      setSuggestions([]);
+      setSuggestLoading(false);
+      return;
+    }
+    const seq = ++suggestSeq.current;
+    setSuggestLoading(true);
+    const t = window.setTimeout(async () => {
+      try {
+        const res = await api.watchlistSuggest(q);
+        if (seq !== suggestSeq.current) return;
+        setSuggestions(res.items || []);
+        setHighlight(0);
+        setOpenSuggest(true);
+      } catch {
+        if (seq !== suggestSeq.current) return;
+        setSuggestions([]);
+      } finally {
+        if (seq === suggestSeq.current) setSuggestLoading(false);
+      }
+    }, 220);
+    return () => window.clearTimeout(t);
+  }, [query, suggestSelected]);
 
   useEffect(() => {
     api.mlflowInfo().then(setMlflowInfo).catch(() => {});
@@ -727,84 +739,70 @@ export default function SignalsPage() {
       {info && <p className="muted">{info}</p>}
 
       <div className="panel" style={{ marginBottom: "1rem" }}>
-        <h3 style={{ marginTop: 0 }}>运维操作</h3>
+        <h3 style={{ marginTop: 0 }}>股票管理</h3>
         <div className="btn-row" style={{ flexWrap: "wrap", marginBottom: "0.75rem" }}>
-          <button
-            type="button"
-            className="btn primary"
-            disabled={anyBusy || items.length === 0 || !!trainBatch}
-            onClick={trainAll}
-            title="按关注列表顺序串行更新；宕机重启后自动续跑"
-          >
-            {trainBatch ? "批量更新进行中…" : "更新全部模型"}
-          </button>
-          {trainBatch && (
-            <button
-              type="button"
-              className="btn"
+          <div style={{ position: "relative", flex: 1, minWidth: 200 }}>
+            <input
+              className="input suggest-input"
+              placeholder="输入代码或名称搜索…"
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setSuggestSelected(null);
+              }}
+              onFocus={() => suggestions.length > 0 && setOpenSuggest(true)}
+              onBlur={() => {
+                blurTimer.current = window.setTimeout(() => setOpenSuggest(false), 150);
+              }}
+              onKeyDown={onSuggestKeyDown}
               disabled={anyBusy}
-              onClick={cancelTrainAll}
-              title="停止批量更新并取消进行中的 Prefect 任务"
-            >
-              停止批量
-            </button>
-          )}
+            />
+            {suggestLoading && (
+              <span className="muted" style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", fontSize: "0.8rem" }}>
+                …
+              </span>
+            )}
+            {openSuggest && suggestions.length > 0 && (
+              <ul className="suggest-list">
+                {suggestions.map((s, i) => (
+                  <li
+                    key={s.code}
+                    className={`suggest-item${i === highlight ? " highlight" : ""}`}
+                    onMouseDown={() => pickSuggest(s)}
+                  >
+                    <span className="suggest-code">{s.code}</span>
+                    <span className="suggest-name">{s.name}</span>
+                    <span className="suggest-ex">{s.exchange}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           <button
             type="button"
             className="btn"
-            disabled={anyBusy || predicting || items.length === 0}
-            onClick={updateDataAll}
-            title="对关注列表并行下载最新行情（download）"
+            disabled={anyBusy || !query.trim()}
+            onClick={addSymbol}
           >
-            更新数据
+            加入列表
           </button>
           <button
             type="button"
-            className="btn primary"
-            disabled={anyBusy || predicting || items.length === 0}
-            onClick={predictAll}
-            title="对关注列表并行执行 merge→…→predict→signals（不重新下载）"
+            className="btn"
+            disabled={anyBusy}
+            onClick={() => importIndex("sse50", "上证50")}
           >
-            预测
+            导入上证50
           </button>
-          {predicting && (
-            <button
-              type="button"
-              className="btn"
-              disabled={anyBusy}
-              onClick={cancelPredict}
-              title="取消排队中/运行中的预测任务"
-            >
-              取消预测
-            </button>
-          )}
+          <button
+            type="button"
+            className="btn"
+            disabled={anyBusy}
+            onClick={() => importIndex("csi300", "沪深300")}
+          >
+            导入沪深300
+          </button>
         </div>
-        {trainBatch && (
-          <div style={{ marginBottom: "0.75rem" }}>
-            <p className="muted" style={{ margin: 0 }}>
-              批量训练 #{trainBatch.batch_id}：已完成 {trainBatch.completed}/{trainBatch.total}
-              {trainBatch.running ? ` · 进行中 ${trainBatch.running}` : ""}
-              {trainBatch.queued ? ` · 排队 ${trainBatch.queued}` : ""}
-              {trainBatch.failed ? ` · 失败 ${trainBatch.failed}` : ""}
-              {trainBatch.skipped ? ` · 跳过 ${trainBatch.skipped}` : ""}
-              {trainBatch.current_symbol ? ` · 当前 ${trainBatch.current_symbol}` : ""}
-              {" · 支持断点续作"}
-            </p>
-            {trainBatch.last_error && (
-              <p className="error" style={{ fontSize: "0.85rem", margin: "0.35rem 0 0" }}>
-                处理器异常（将自动重试）：{trainBatch.last_error}
-              </p>
-            )}
-          </div>
-        )}
-        {predicting && (
-          <p className="muted" style={{ margin: "0 0 0.65rem" }}>
-            {activeBatchLabel}进行中：运行 {predictStats.running} · 排队 {predictStats.queued}
-            {predictStats.failed ? ` · 失败 ${predictStats.failed}` : ""}
-            （并发执行中，超出槽位的标的自动排队；可点「取消预测」）
-          </p>
-        )}
-        {activePredictJob && <JobProgress job={activePredictJob} />}
 
         <h3>盘后定时预测</h3>
         <div className="btn-row" style={{ flexWrap: "wrap", marginBottom: 0 }}>
@@ -833,7 +831,7 @@ export default function SignalsPage() {
 
       {items.length === 0 ? (
         <div className="panel">
-          <p className="muted">暂无关注股票，请先到 Watchlist 添加</p>
+          <p className="muted">暂无关注股票，请在上方搜索并添加股票，或导入指数成分股</p>
         </div>
       ) : (
         <div className="panel">
@@ -855,14 +853,9 @@ export default function SignalsPage() {
                 <tr>
                   <th>代码</th>
                   <th>名称</th>
-                  <th>训练</th>
-                  <th>信号</th>
-                  <th>Score</th>
-                  {ALGOS.map((a) => (
-                    <th key={a}>{a.toUpperCase()}</th>
-                  ))}
-                  <th>收盘</th>
-                  <th>时间</th>
+                  <th>最近训练</th>
+                  <th>最近数据</th>
+                  <th>最近预测</th>
                   <th>操作</th>
                 </tr>
                 <tr className="signals-filter-row">
@@ -884,195 +877,60 @@ export default function SignalsPage() {
                       onClick={stopRowClick}
                     />
                   </th>
-                  <th>
-                    <select
-                      className="input signals-filter-input"
-                      value={filters.train}
-                      onChange={(e) => setFilter("train", e.target.value)}
-                      onClick={stopRowClick}
-                    >
-                      <option value="">全部</option>
-                      <option value="ready">ready</option>
-                      <option value="untrained">untrained</option>
-                      <option value="running">running</option>
-                      <option value="queued">queued</option>
-                      <option value="failed">failed</option>
-                    </select>
-                  </th>
-                  <th>
-                    <select
-                      className="input signals-filter-input"
-                      value={filters.vote}
-                      onChange={(e) => setFilter("vote", e.target.value as VoteFilter)}
-                      onClick={stopRowClick}
-                    >
-                      {VOTE_OPTIONS.map((o) => (
-                        <option key={o.value || "all"} value={o.value}>
-                          {o.label}
-                        </option>
-                      ))}
-                    </select>
-                  </th>
-                  <th>
-                    <div className="signals-filter-range">
-                      <input
-                        className="input signals-filter-input"
-                        type="number"
-                        step="any"
-                        placeholder="≥"
-                        value={filters.scoreMin}
-                        onChange={(e) => setFilter("scoreMin", e.target.value)}
-                        onClick={stopRowClick}
-                      />
-                      <input
-                        className="input signals-filter-input"
-                        type="number"
-                        step="any"
-                        placeholder="≤"
-                        value={filters.scoreMax}
-                        onChange={(e) => setFilter("scoreMax", e.target.value)}
-                        onClick={stopRowClick}
-                      />
-                    </div>
-                  </th>
-                  {ALGOS.map((a) => (
-                    <th key={a}>
-                      <select
-                        className="input signals-filter-input"
-                        value={filters.algos[a]}
-                        onChange={(e) => setAlgoFilter(a, e.target.value as VoteFilter)}
-                        onClick={stopRowClick}
-                      >
-                        {VOTE_OPTIONS.map((o) => (
-                          <option key={o.value || "all"} value={o.value}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                    </th>
-                  ))}
-                  <th>
-                    <div className="signals-filter-range">
-                      <input
-                        className="input signals-filter-input"
-                        type="number"
-                        step="any"
-                        placeholder="≥"
-                        value={filters.closeMin}
-                        onChange={(e) => setFilter("closeMin", e.target.value)}
-                        onClick={stopRowClick}
-                      />
-                      <input
-                        className="input signals-filter-input"
-                        type="number"
-                        step="any"
-                        placeholder="≤"
-                        value={filters.closeMax}
-                        onChange={(e) => setFilter("closeMax", e.target.value)}
-                        onClick={stopRowClick}
-                      />
-                    </div>
-                  </th>
-                  <th>
-                    <select
-                      className="input signals-filter-input"
-                      value={filters.hasSignal}
-                      onChange={(e) =>
-                        setFilter("hasSignal", e.target.value as "" | "yes" | "no")
-                      }
-                      onClick={stopRowClick}
-                    >
-                      <option value="">全部</option>
-                      <option value="yes">BUY/SELL</option>
-                      <option value="no">非买卖</option>
-                    </select>
-                  </th>
+                  <th />
+                  <th />
+                  <th />
                   <th />
                 </tr>
               </thead>
               <tbody>
                 {filteredItems.length === 0 ? (
                   <tr>
-                    <td colSpan={11} className="muted signals-empty-filter">
+                    <td colSpan={6} className="muted signals-empty-filter">
                       无匹配行，请调整过滤条件
                     </td>
                   </tr>
                 ) : (
                   filteredItems.map((it) => {
-                    const score = avgScore(it.algorithms);
-                    const vote = voteLabel(it);
                     const isActive = detailOpen && symbol === it.symbol;
                     return (
                       <tr
                         key={it.symbol}
                         className={`signals-row${isActive ? " active" : ""}`}
-                        onClick={() => openDetail(it.symbol)}
                       >
                         <td>
                           <strong className="gauge-card-symbol">{it.symbol}</strong>
                         </td>
                         <td className="muted">{it.name || it.exchange || "—"}</td>
-                        <td onClick={stopRowClick}>
-                          <span className={badgeClass(it.train_status || "untrained")}>
-                            {it.train_status || "untrained"}
-                          </span>
-                          {it.job_progress &&
-                            (it.train_status === "running" || it.train_status === "queued") && (
-                              <div style={{ marginTop: "0.35rem" }}>
-                                <JobProgress job={it.job_progress} compact />
-                              </div>
-                            )}
+                        <td className="muted" style={{ whiteSpace: "nowrap" }}>
+                          {formatTime(it.last_trained_at)}
                         </td>
-                        <td>
-                          {vote ? (
-                            <span className={recClass(vote)}>{vote}</span>
-                          ) : (
-                            <span className="muted">无信号</span>
-                          )}
+                        <td className="muted" style={{ whiteSpace: "nowrap" }}>
+                          {formatTime(it.last_data_downloaded_at)}
                         </td>
-                        <td className="signals-score">{formatScore(score)}</td>
-                        {ALGOS.map((a) => {
-                          const rec = it.algorithms?.[a]?.recommendation;
-                          const sc = it.algorithms?.[a]?.trade_score;
-                          if (!it.signal_available || !rec) {
-                            return (
-                              <td key={a}>
-                                <span className="muted">—</span>
-                              </td>
-                            );
-                          }
-                          return (
-                            <td key={a} title={sc != null ? String(sc) : ""}>
-                              <span className={recClass(rec)}>{normalizeVote(rec)}</span>
-                            </td>
-                          );
-                        })}
-                        <td>{it.close != null ? Number(it.close).toFixed(2) : "—"}</td>
-                        <td className="muted">
-                          {it.signal_timestamp
-                            ? new Date(it.signal_timestamp).toLocaleString()
-                            : "—"}
+                        <td className="muted" style={{ whiteSpace: "nowrap" }}>
+                          {formatTime(it.last_predicted_at)}
                         </td>
                         <td onClick={stopRowClick}>
-                          {canStopTrain(it) ? (
+                          <div className="btn-row" style={{ gap: "0.35rem" }}>
                             <button
                               type="button"
                               className="btn"
                               disabled={anyBusy}
-                              onClick={() => cancelTrainOne(it.symbol)}
+                              onClick={() => openDetail(it.symbol)}
                             >
-                              停止
+                              详情
                             </button>
-                          ) : (
                             <button
                               type="button"
-                              className="btn primary"
-                              disabled={anyBusy || !!trainBatch}
-                              onClick={() => trainOne(it.symbol)}
+                              className="btn danger"
+                              disabled={anyBusy}
+                              onClick={() => removeSymbol(it.symbol)}
+                              title="从关注列表移除"
                             >
-                              更新模型
+                              ×
                             </button>
-                          )}
+                          </div>
                         </td>
                       </tr>
                     );

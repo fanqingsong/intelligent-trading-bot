@@ -81,6 +81,13 @@ else
   docker compose -f "${COMPOSE_FILE}" up -d
 fi
 
+# Wait for postgres to be ready, then run Alembic migrations.
+echo "Running database migrations..."
+until docker compose -f "${COMPOSE_FILE}" exec -T postgres pg_isready -U itb -d itb > /dev/null 2>&1; do
+  sleep 1
+done
+docker compose -f "${COMPOSE_FILE}" exec -T api alembic upgrade head
+
 echo ""
 echo "Services started:"
 echo "  Web UI:       http://localhost:5174"

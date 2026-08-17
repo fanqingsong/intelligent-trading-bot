@@ -732,14 +732,33 @@ def recent_signals(
     rows: int = Query(50, ge=1, le=500),
     symbol: str | None = Query(None),
 ):
+    import pandas as pd
+
     config = load_config_dict()
     sym = symbol or config.get("symbol", "600519")
-    df = load_frame_tail(sym, "signals", n=rows)
-    if df.empty:
+    sig_df = load_frame_tail(sym, "signals", n=rows)
+    if sig_df.empty:
         return {"columns": [], "rows": [], "total_rows": 0, "symbol": sym, "source": "postgres"}
-    records = json.loads(df.to_json(orient="records", date_format="iso"))
+    # Merge recent klines so the chart shows K-line bars for dates beyond the last
+    # prediction run (signals frame only grows when predict executes).
+    kl_df = load_frame_tail(sym, "klines", n=rows)
+    if not kl_df.empty and "timestamp" in kl_df.columns and "timestamp" in sig_df.columns:
+        merged = sig_df.merge(kl_df, on="timestamp", how="outer", suffixes=("", "_kl"))
+        # For klines-only rows (no signal data), copy OHLC from _kl columns.
+        ohlc = ["open", "high", "low", "close"]
+        for col in ohlc:
+            if f"{col}_kl" in merged.columns:
+                merged[col] = merged[col].fillna(merged[f"{col}_kl"])
+                merged.drop(columns=[f"{col}_kl"], inplace=True)
+        # Drop pure klines-only auxiliary columns (volume etc.) to keep schema clean.
+        kl_extra = [c for c in merged.columns if c.endswith("_kl")]
+        merged.drop(columns=kl_extra, inplace=True)
+        merged.sort_values("timestamp", inplace=True)
+        merged.reset_index(drop=True, inplace=True)
+        sig_df = merged
+    records = json.loads(sig_df.to_json(orient="records", date_format="iso"))
     return {
-        "columns": list(df.columns),
+        "columns": list(sig_df.columns),
         "rows": records,
         "total_rows": frame_row_count(sym, "signals"),
         "symbol": sym,

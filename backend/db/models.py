@@ -22,6 +22,7 @@ class WatchlistItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     last_trained_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_predicted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_data_downloaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     train_status: Mapped[str] = mapped_column(String(32), default="untrained", nullable=False)
     predict_status: Mapped[str] = mapped_column(String(32), default="idle", nullable=False)
     last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
