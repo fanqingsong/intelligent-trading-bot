@@ -1,5 +1,4 @@
 import { Navigate, NavLink, Route, Routes, useSearchParams } from "react-router-dom";
-import WatchlistPage from "./pages/Watchlist";
 import Dashboard from "./pages/Dashboard";
 import ConfigPage from "./pages/Config";
 import PipelinePage from "./pages/Pipeline";
@@ -9,7 +8,6 @@ import SignalsPage from "./pages/Signals";
 
 const primaryLinks = [
   ["/", "Signals"],
-  ["/watchlist", "Watchlist"],
 ] as const;
 
 const advancedLinks = [
@@ -52,7 +50,7 @@ export default function App() {
       <main className="main">
         <Routes>
           <Route path="/" element={<SignalsPage />} />
-          <Route path="/watchlist" element={<WatchlistPage />} />
+          <Route path="/watchlist" element={<Navigate to="/" replace />} />
           <Route path="/signals" element={<Navigate to="/" replace />} />
           <Route path="/models" element={<ModelsRedirect />} />
           <Route path="/dashboard" element={<Dashboard />} />
